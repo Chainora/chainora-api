@@ -1,6 +1,10 @@
 package handler
 
 import (
+	"fmt"
+	"strings"
+
+	"chainora-api/core/constants"
 	"chainora-api/core/usecases"
 	"chainora-api/rest/controllers"
 	"chainora-api/rest/handler/requests"
@@ -15,6 +19,8 @@ type AuthHandler struct {
 	initSessionUC  *initSessionUsecase
 	waitForLoginUC *waitForLoginUsecase
 	verifySignUC   *verifySignatureUsecase
+	refreshTokenUC *refreshTokenUsecase
+	meUC           *meUsecase
 }
 
 func NewAuthHandler(authUsecase usecases.AuthUsecase, issuer TokenIssuer, hub *controllers.WSHub) *AuthHandler {
@@ -34,6 +40,14 @@ func NewAuthHandler(authUsecase usecases.AuthUsecase, issuer TokenIssuer, hub *c
 			auth:     authUsecase,
 			issuer:   issuer,
 			hub:      hub,
+			validate: validate,
+		},
+		refreshTokenUC: &refreshTokenUsecase{
+			issuer:   issuer,
+			validate: validate,
+		},
+		meUC: &meUsecase{
+			issuer:   issuer,
 			validate: validate,
 		},
 	}
@@ -102,4 +116,65 @@ func (h *AuthHandler) VerifySignature(ctx *gin.Context) {
 	}
 
 	response.Write(ctx.Writer, response.Ok(resp))
+}
+
+// RefreshToken godoc
+// @Summary Refresh access token
+// @Description Exchanges a valid refresh token for a new access token and rotated refresh token.
+// @Tags auth
+// @Accept json
+// @Produce json
+// @Param payload body refreshTokenRequest true "Refresh token payload"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]interface{}
+// @Failure 401 {object} map[string]interface{}
+// @Router /v1/auth/refresh [post]
+func (h *AuthHandler) RefreshToken(ctx *gin.Context) {
+	var req refreshTokenRequest
+	if err := requests.Serialize(ctx, &req); err != nil {
+		response.WriteError(ctx, err)
+		return
+	}
+
+	resp, err := h.refreshTokenUC.Trigger(ctx, req)
+	if err != nil {
+		response.WriteError(ctx, err)
+		return
+	}
+
+	response.Write(ctx.Writer, response.Ok(resp))
+}
+
+// Me godoc
+// @Summary Get current authenticated user
+// @Description Returns auth identity from Bearer access token.
+// @Tags auth
+// @Produce json
+// @Success 200 {object} map[string]interface{}
+// @Failure 401 {object} map[string]interface{}
+// @Router /v1/auth/me [get]
+func (h *AuthHandler) Me(ctx *gin.Context) {
+	accessToken, err := extractBearerToken(ctx.GetHeader("Authorization"))
+	if err != nil {
+		response.WriteError(ctx, err)
+		return
+	}
+
+	resp, triggerErr := h.meUC.Trigger(ctx, meRequest{AccessToken: accessToken})
+	if triggerErr != nil {
+		response.WriteError(ctx, triggerErr)
+		return
+	}
+
+	response.Write(ctx.Writer, response.Ok(resp))
+}
+
+func extractBearerToken(header string) (string, error) {
+	value := strings.TrimSpace(header)
+	parts := strings.SplitN(value, " ", 2)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || strings.TrimSpace(parts[1]) == "" {
+		return "", fmt.Errorf("%w: missing bearer token", constants.ErrInvalidToken)
+	}
+
+	return strings.TrimSpace(parts[1]), nil
 }

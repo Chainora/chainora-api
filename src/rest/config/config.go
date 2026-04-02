@@ -24,11 +24,19 @@ func Load() properties.AppProperties {
 		}
 	}
 
+	refreshTTLMinutes := 60 * 24 * 7
+	if raw := strings.TrimSpace(os.Getenv("JWT_REFRESH_TTL_MINUTES")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			refreshTTLMinutes = parsed
+		}
+	}
+
 	return properties.AppProperties{
 		ServerPort:          port,
 		JWTSecret:           jwtSecret,
 		JWTIssuer:           jwtIssuer,
 		JWTTTL:              time.Duration(ttlMinutes) * time.Minute,
+		JWTRefreshTTL:       time.Duration(refreshTTLMinutes) * time.Minute,
 		AuthMessageTemplate: authTemplate,
 		InitiaRPCURL:        initiaRPC,
 		DBURL:               dbURL,

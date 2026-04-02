@@ -31,7 +31,7 @@ func Build() *App {
 
 	authRepository := repositories.NewInMemoryAuthRepository()
 	cryptoService := services.NewCryptoService()
-	jwtService := services.NewJWTService(cfg.JWTSecret, cfg.JWTIssuer, cfg.JWTTTL)
+	jwtService := services.NewJWTService(cfg.JWTSecret, cfg.JWTIssuer, cfg.JWTTTL, cfg.JWTRefreshTTL)
 	authUsecase := usecases.NewAuthUsecase(authRepository, cryptoService, properties.AuthProperties{
 		AuthMessageTemplate: cfg.AuthMessageTemplate,
 	})

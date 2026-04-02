@@ -17,7 +17,9 @@ import (
 
 // TokenIssuer is the abstraction used to mint JWTs.
 type TokenIssuer interface {
-	GenerateToken(sessionID, address string) (string, error)
+	GenerateTokenPair(sessionID, address string) (string, string, error)
+	RefreshFromToken(refreshToken string) (string, string, string, error)
+	ParseAccessToken(accessToken string) (string, string, error)
 }
 
 type initSessionRequest struct{}
@@ -39,16 +41,37 @@ type verifySignatureRequest struct {
 }
 
 type verifySignatureResponse struct {
-	Verified bool   `json:"verified"`
-	Address  string `json:"address"`
-	Token    string `json:"token"`
+	Verified     bool   `json:"verified"`
+	Address      string `json:"address"`
+	Token        string `json:"token"`
+	RefreshToken string `json:"refreshToken"`
 }
 
 type wsLoginVerifiedEvent struct {
-	Status    string `json:"status"`
-	SessionID string `json:"sessionId"`
+	Status       string `json:"status"`
+	SessionID    string `json:"sessionId"`
+	Address      string `json:"address"`
+	Token        string `json:"token"`
+	RefreshToken string `json:"refreshToken"`
+}
+
+type refreshTokenRequest struct {
+	RefreshToken string `json:"refreshToken" validate:"required"`
+}
+
+type refreshTokenResponse struct {
+	Token        string `json:"token"`
+	RefreshToken string `json:"refreshToken"`
+	Address      string `json:"address"`
+}
+
+type meRequest struct {
+	AccessToken string `json:"accessToken" validate:"required"`
+}
+
+type meResponse struct {
 	Address   string `json:"address"`
-	Token     string `json:"token"`
+	SessionID string `json:"sessionId"`
 }
 
 type initSessionUsecase struct {
@@ -107,6 +130,16 @@ type verifySignatureUsecase struct {
 	validate *validator.Validate
 }
 
+type refreshTokenUsecase struct {
+	issuer   TokenIssuer
+	validate *validator.Validate
+}
+
+type meUsecase struct {
+	issuer   TokenIssuer
+	validate *validator.Validate
+}
+
 func (u *verifySignatureUsecase) Trigger(_ *gin.Context, req verifySignatureRequest) (verifySignatureResponse, error) {
 	if err := u.validate.Struct(req); err != nil {
 		return verifySignatureResponse{}, err
@@ -117,16 +150,17 @@ func (u *verifySignatureUsecase) Trigger(_ *gin.Context, req verifySignatureRequ
 		return verifySignatureResponse{}, err
 	}
 
-	token, err := u.issuer.GenerateToken(req.SessionID, user.Address)
+	token, refreshToken, err := u.issuer.GenerateTokenPair(req.SessionID, user.Address)
 	if err != nil {
 		return verifySignatureResponse{}, fmt.Errorf("generate token: %w", err)
 	}
 
 	message, err := json.Marshal(wsLoginVerifiedEvent{
-		Status:    "verified",
-		SessionID: req.SessionID,
-		Address:   user.Address,
-		Token:     token,
+		Status:       "verified",
+		SessionID:    req.SessionID,
+		Address:      user.Address,
+		Token:        token,
+		RefreshToken: refreshToken,
 	})
 	if err != nil {
 		return verifySignatureResponse{}, fmt.Errorf("marshal websocket payload: %w", err)
@@ -134,7 +168,45 @@ func (u *verifySignatureUsecase) Trigger(_ *gin.Context, req verifySignatureRequ
 	u.hub.Broadcast(req.SessionID, message)
 	log.Printf("qr verify success sessionId=%s address=%s", req.SessionID, user.Address)
 
-	return verifySignatureResponse{Verified: true, Address: user.Address, Token: token}, nil
+	return verifySignatureResponse{
+		Verified:     true,
+		Address:      user.Address,
+		Token:        token,
+		RefreshToken: refreshToken,
+	}, nil
+}
+
+func (u *refreshTokenUsecase) Trigger(_ *gin.Context, req refreshTokenRequest) (refreshTokenResponse, error) {
+	if err := u.validate.Struct(req); err != nil {
+		return refreshTokenResponse{}, err
+	}
+
+	accessToken, nextRefreshToken, address, err := u.issuer.RefreshFromToken(req.RefreshToken)
+	if err != nil {
+		return refreshTokenResponse{}, err
+	}
+
+	return refreshTokenResponse{
+		Token:        accessToken,
+		RefreshToken: nextRefreshToken,
+		Address:      address,
+	}, nil
+}
+
+func (u *meUsecase) Trigger(_ *gin.Context, req meRequest) (meResponse, error) {
+	if err := u.validate.Struct(req); err != nil {
+		return meResponse{}, err
+	}
+
+	sessionID, address, err := u.issuer.ParseAccessToken(req.AccessToken)
+	if err != nil {
+		return meResponse{}, err
+	}
+
+	return meResponse{
+		Address:   address,
+		SessionID: sessionID,
+	}, nil
 }
 
 func newWaitForLoginRequest(rawSessionID string) waitForLoginRequest {

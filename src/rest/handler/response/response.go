@@ -35,6 +35,8 @@ func WriteError(ctx *gin.Context, err error) {
 		status = http.StatusGone
 	case errors.Is(err, constants.ErrInvalidSignature):
 		status = http.StatusUnauthorized
+	case errors.Is(err, constants.ErrInvalidToken):
+		status = http.StatusUnauthorized
 	case errors.Is(err, constants.ErrUserNotFound):
 		status = http.StatusNotFound
 	default:

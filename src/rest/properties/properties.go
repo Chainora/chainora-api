@@ -8,6 +8,7 @@ type AppProperties struct {
 	JWTSecret           string
 	JWTIssuer           string
 	JWTTTL              time.Duration
+	JWTRefreshTTL       time.Duration
 	AuthMessageTemplate string
 	InitiaRPCURL        string
 	DBURL               string

@@ -10,5 +10,7 @@ func RegisterAuthRoutes(v1 *gin.RouterGroup, authHandler *handler.AuthHandler) {
 	auth := v1.Group("/auth")
 	auth.GET("/session", authHandler.InitSession)
 	auth.GET("/ws/:sessionId", authHandler.WaitForLoginWS)
+	auth.GET("/me", authHandler.Me)
 	auth.POST("/verify", authHandler.VerifySignature)
+	auth.POST("/refresh", authHandler.RefreshToken)
 }
