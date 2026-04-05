@@ -1,0 +1,19 @@
+# VCS and editor metadata
+.git
+.github
+.vscode
+
+# Local secrets
+*.env
+*.env.*
+!*.env.example
+src/migration/config/staging.env
+src/migration/config/product.env
+
+# Build artifacts and local noise
+**/bin
+**/build
+**/.DS_Store
+
+# Docs and non-runtime assets
+docs
