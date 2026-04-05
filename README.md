@@ -40,12 +40,12 @@ make abigen
 
 ## Bring Up Local Development Environment
 
-### Initialize Database Config
+### Initialize Staging Database Config
 
-First, initialize migration local config:
+Edit staging config file and set Railway staging database URL:
 
 ```bash
-cp ./src/migration/config/local.yml.example ./src/migration/config/local.yml
+vi ./src/migration/config/staging.env
 ```
 
 ### Run Setup Commands

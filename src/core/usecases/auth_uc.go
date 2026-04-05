@@ -17,6 +17,7 @@ import (
 type AuthRepository interface {
 	SaveSession(session entities.AuthSession) error
 	GetSession(sessionID string) (entities.AuthSession, error)
+	GetUser(address string) (entities.User, error)
 	UpdateUser(user entities.User) error
 	DeleteSession(sessionID string) error
 }
@@ -38,6 +39,8 @@ type AuthUsecase interface {
 	GenerateLoginSession() (entities.AuthSession, error)
 	ValidateLoginSession(sessionID string) error
 	AuthenticateUser(sessionID, address, signatureHex string, recoveryV *int) (entities.User, error)
+	GetUserProfile(address string) (entities.User, error)
+	UpdateUserProfile(address, username string) (entities.User, error)
 }
 
 type authUsecase struct {
@@ -146,6 +149,43 @@ func (u *authUsecase) AuthenticateUser(sessionID, address, signatureHex string, 
 
 	if err := u.repo.DeleteSession(sessionID); err != nil {
 		return entities.User{}, fmt.Errorf("consume session: %w", err)
+	}
+
+	return user, nil
+}
+
+func (u *authUsecase) GetUserProfile(address string) (entities.User, error) {
+	resolvedAddress := strings.ToLower(strings.TrimSpace(address))
+	if resolvedAddress == "" {
+		return entities.User{}, constants.ErrUserNotFound
+	}
+
+	user, err := u.repo.GetUser(resolvedAddress)
+	if err == nil {
+		return user, nil
+	}
+
+	if !errors.Is(err, constants.ErrUserNotFound) {
+		return entities.User{}, fmt.Errorf("get user: %w", err)
+	}
+
+	return entities.User{}, constants.ErrUserNotFound
+}
+
+func (u *authUsecase) UpdateUserProfile(address, username string) (entities.User, error) {
+	trimmedUsername := strings.TrimSpace(username)
+	if trimmedUsername == "" {
+		return entities.User{}, fmt.Errorf("username is required")
+	}
+
+	user, err := u.GetUserProfile(address)
+	if err != nil {
+		return entities.User{}, err
+	}
+
+	user.Username = trimmedUsername
+	if err := u.repo.UpdateUser(user); err != nil {
+		return entities.User{}, fmt.Errorf("update user profile: %w", err)
 	}
 
 	return user, nil

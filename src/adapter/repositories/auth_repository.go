@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 
+	"chainora-api/adapter/models"
 	"chainora-api/core/constants"
 	"chainora-api/core/entities"
 )
@@ -43,6 +44,25 @@ func (r *InMemoryAuthRepository) DeleteSession(sessionID string) error {
 	return nil
 }
 
+func (r *InMemoryAuthRepository) GetUser(address string) (entities.User, error) {
+	key := strings.ToLower(strings.TrimSpace(address))
+	if key == "" {
+		return entities.User{}, fmt.Errorf("get user: %w", constants.ErrUserNotFound)
+	}
+
+	value, ok := r.users.Load(key)
+	if !ok {
+		return entities.User{}, fmt.Errorf("get user: %w", constants.ErrUserNotFound)
+	}
+
+	model, castOk := value.(models.UserModel)
+	if !castOk {
+		return entities.User{}, errors.New("invalid user payload")
+	}
+
+	return model.ToEntity(), nil
+}
+
 func (r *InMemoryAuthRepository) UpdateUser(user entities.User) error {
 	address := strings.ToLower(strings.TrimSpace(user.Address))
 	if address == "" {
@@ -50,15 +70,35 @@ func (r *InMemoryAuthRepository) UpdateUser(user entities.User) error {
 	}
 
 	if existing, ok := r.users.Load(address); ok {
-		oldUser, castOk := existing.(entities.User)
+		oldUser, castOk := existing.(models.UserModel)
 		if !castOk {
 			return errors.New("invalid user payload")
+		}
+
+		if strings.TrimSpace(user.Username) == "" {
+			user.Username = oldUser.Username
+		}
+		if strings.TrimSpace(user.TCNR) == "" {
+			user.TCNR = oldUser.TCNR
+		}
+		if strings.TrimSpace(user.KYCStatus) == "" {
+			user.KYCStatus = oldUser.KYCStatus
 		}
 		if strings.TrimSpace(user.PublicKey) == "" {
 			user.PublicKey = oldUser.PublicKey
 		}
 	}
 
-	r.users.Store(address, user)
+	if strings.TrimSpace(user.Username) == "" {
+		user.Username = "Chainora User"
+	}
+	if strings.TrimSpace(user.TCNR) == "" {
+		user.TCNR = "0"
+	}
+	if strings.TrimSpace(user.KYCStatus) == "" {
+		user.KYCStatus = "unavailable"
+	}
+
+	r.users.Store(address, models.UserModelFromEntity(user))
 	return nil
 }

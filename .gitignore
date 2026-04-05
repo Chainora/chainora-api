@@ -1,0 +1,3 @@
+# Local secret env files
+src/migration/config/staging.env
+src/migration/config/product.env

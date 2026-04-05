@@ -1,8 +1,11 @@
 package bootstrap
 
 import (
+	"database/sql"
 	"fmt"
+	"log"
 	"net/http"
+	"strings"
 
 	"chainora-api/adapter/repositories"
 	"chainora-api/adapter/services"
@@ -17,6 +20,7 @@ import (
 
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
+	_ "github.com/lib/pq"
 )
 
 // App contains initialized REST server dependencies.
@@ -29,7 +33,20 @@ type App struct {
 func Build() *App {
 	cfg := restconfig.Load()
 
-	authRepository := repositories.NewInMemoryAuthRepository()
+	var authRepository usecases.AuthRepository = repositories.NewInMemoryAuthRepository()
+	if dbURL := strings.TrimSpace(cfg.DBURL); dbURL != "" {
+		db, err := sql.Open("postgres", dbURL)
+		if err != nil {
+			log.Printf("[bootstrap] failed to open postgres, fallback to in-memory auth repository: %v", err)
+		} else if pingErr := db.Ping(); pingErr != nil {
+			log.Printf("[bootstrap] failed to ping postgres, fallback to in-memory auth repository: %v", pingErr)
+			_ = db.Close()
+		} else {
+			authRepository = repositories.NewPostgresAuthRepository(db)
+			log.Printf("[bootstrap] using postgres auth repository")
+		}
+	}
+
 	cryptoService := services.NewCryptoService()
 	jwtService := services.NewJWTService(cfg.JWTSecret, cfg.JWTIssuer, cfg.JWTTTL, cfg.JWTRefreshTTL)
 	authUsecase := usecases.NewAuthUsecase(authRepository, cryptoService, properties.AuthProperties{

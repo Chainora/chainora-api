@@ -1,5 +1,0 @@
-# Local migration config
-# Copy to local.yml and adjust values.
-
-DATABASE_URL: "postgres://chainora:chainora@localhost:5432/chainora?sslmode=disable"
-MIGRATIONS_DIR: "migrations"
