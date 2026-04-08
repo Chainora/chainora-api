@@ -62,7 +62,7 @@ func loadEnvFile() {
 	}
 
 	defaultCandidates := []string{
-		"../migration/config/staging.env",
+		"../migration/config/.env",
 	}
 
 	for _, path := range defaultCandidates {

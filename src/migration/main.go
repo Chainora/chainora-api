@@ -83,7 +83,7 @@ func loadConfig() (migrationConfig, error) {
 
 	configFile := strings.TrimSpace(os.Getenv("MIGRATION_CONFIG_FILE"))
 	if configFile == "" {
-		configFile = "config/staging.env"
+		configFile = "config/.env"
 	}
 
 	if configFile != "" {

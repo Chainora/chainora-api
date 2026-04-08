@@ -7,8 +7,7 @@
 *.env
 *.env.*
 !*.env.example
-src/migration/config/staging.env
-src/migration/config/product.env
+src/migration/config/.env
 
 # Build artifacts and local noise
 **/bin

@@ -1,3 +1,5 @@
 # Local secret env files
-src/migration/config/staging.env
-src/migration/config/product.env
+src/migration/config/.env
+
+# Local API testing assets
+postman/chainora-api.local.postman_collection.json

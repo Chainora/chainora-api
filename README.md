@@ -2,10 +2,6 @@
 
 Backend service for Chainora QR login flow (Web DApp + Mobile App + JavaCard signature verification).
 
-## Vietnamese Setup Doc
-
-- docs/backend-setup-vi.md
-
 ## Quick Start
 
 ## Prerequisites
@@ -20,9 +16,9 @@ Verify these environment variables:
 
 Recommendation: use `gvm` (Go Version Manager) to manage versions and quickly switch environments.
 
-### Docker
+### Docker (optional)
 
-Docker is used to run local infrastructure (PostgreSQL) for development.
+Docker is only needed when you want to build/run the backend image locally.
 
 ### Abigen
 
@@ -40,12 +36,13 @@ make abigen
 
 ## Bring Up Local Development Environment
 
-### Initialize Staging Database Config
+### Initialize Database Config
 
-Edit staging config file and set Railway staging database URL:
+Use a single env file and set your database URL (Supabase/Render):
 
 ```bash
-vi ./src/migration/config/staging.env
+cp ./src/migration/config/.env.example ./src/migration/config/.env
+vi ./src/migration/config/.env
 ```
 
 ### Run Setup Commands
@@ -53,7 +50,6 @@ vi ./src/migration/config/staging.env
 Run these commands in order:
 
 ```bash
-make up
 make tidy
 make migrate
 ```

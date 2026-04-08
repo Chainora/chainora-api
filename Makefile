@@ -1,18 +1,10 @@
 SHELL := /bin/bash
 
-.PHONY: rest tidy migrate migrate-up up down migration abigen
-
-DOCKER_COMPOSE := docker compose
+.PHONY: rest tidy migrate migrate-up migrate-all migration abigen
 MIGRATION_NAME ?= migration
 
 rest:
 	cd src/rest && go run .
-
-up:
-	$(DOCKER_COMPOSE) up -d postgres
-
-down:
-	$(DOCKER_COMPOSE) down
 
 tidy:
 	cd src/core && go mod tidy
@@ -24,6 +16,9 @@ migrate:
 	cd src/migration && go run .
 
 migrate-up:
+	$(MAKE) migrate
+
+migrate-all:
 	$(MAKE) migrate
 
 migration:
