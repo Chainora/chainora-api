@@ -15,8 +15,11 @@ Convert user prompts into exact code changes with minimal regressions.
 - Preserve requested invariants exactly.
 - Prefer minimal diffs over broad rewrites.
 - Keep module boundaries (`core`, `adapter`, `rest`) and imports consistent.
+- Keep worker boundaries (`worker/bootstrap`, `worker/jobs`, `worker/scanners`, `worker/orchestrators`) consistent.
 - Keep endpoint behavior and payload contracts stable unless change is requested.
 - Never silently remove features; if conflict exists, state it and apply safest interpretation.
+- Treat username as on-chain source-of-truth unless user explicitly asks otherwise.
+- Keep runtime configuration module-local by default (`src/rest/config/config.yaml`, `src/worker/config/config.yaml`).
 
 ## Workflow
 1. Build a Requirement Lock from the prompt.
@@ -29,6 +32,8 @@ Convert user prompts into exact code changes with minimal regressions.
 - Keep QR sign-in flow order intact unless explicitly requested.
 - Keep WebSocket session mapping behavior consistent.
 - Keep signature verification compatibility (EIP-191 and V bit handling).
+- For async/on-chain retry logic, implement through worker jobs and orchestrators.
+- Keep primary username selection as an explicit signed action (no implicit auto-switch in backend).
 
 ## Output Format
 - Requirement Coverage

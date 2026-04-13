@@ -9,13 +9,3 @@ type AuthSession struct {
 	Address   string
 	CreatedAt time.Time
 }
-
-// User represents a wallet user that can authenticate with Chainora.
-type User struct {
-	Address   string
-	Username  string
-	TCNR      string
-	KYCStatus string
-	PublicKey string
-	LastLogin time.Time
-}

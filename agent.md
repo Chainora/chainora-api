@@ -16,8 +16,15 @@ Keep updates short and focused on: changed areas, verification commands, and cav
 - `src/adapter/`: repositories and external clients
 - `src/rest/`: Gin handlers, routing, and WebSocket hub
 - `src/migration/`: SQL migrations
-- `src/worker/`: background workers
+- `src/worker/`: background worker runtime (`bootstrap/config/handlers/jobs/orchestrators/routers/scanners`)
+
+## Username Policy
+- Username is on-chain source-of-truth.
+- Do not re-introduce manual username edit endpoint in backend.
+- `GET /v1/auth/profile` resolves username via Initia username APIs.
 
 ## Verify
 - `cd src/rest && go test ./...`
+- `cd src/worker && go test ./...`
 - `make rest`
+- `make worker`

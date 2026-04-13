@@ -3,3 +3,5 @@ src/migration/config/.env
 
 # Local API testing assets
 postman/chainora-api.local.postman_collection.json
+scripts/*
+docs/*

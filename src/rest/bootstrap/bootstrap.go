@@ -48,24 +48,62 @@ func Build() *App {
 	}
 
 	cryptoService := services.NewCryptoService()
+	initiaUsernameService := services.NewInitiaUsernameService(cfg.InitiaAPIURL)
 	jwtService := services.NewJWTService(cfg.JWTSecret, cfg.JWTIssuer, cfg.JWTTTL, cfg.JWTRefreshTTL)
 	authUsecase := usecases.NewAuthUsecase(authRepository, cryptoService, properties.AuthProperties{
 		AuthMessageTemplate: cfg.AuthMessageTemplate,
 	})
+	relayerService := services.NewRelayerService(
+		cfg.RelayerMasterPrivateKey,
+		cfg.RelayerMasterAddress,
+		cfg.RelayerInitiadBinary,
+		cfg.RelayerChainID,
+		cfg.RelayerNodeURL,
+		cfg.RelayerKeyName,
+		cfg.RelayerKeyringBackend,
+		cfg.RelayerHome,
+		cfg.RelayerGasPrices,
+		cfg.RelayerMoveModuleAddr,
+		cfg.RelayerMoveModuleName,
+		cfg.RelayerMoveFunctionName,
+		cfg.RelayerMoveArgsJSON,
+		cfg.RelayerMoveTypeArgsJSON,
+		cfg.RelayerMovePrimaryFunctionName,
+		cfg.RelayerMovePrimaryArgsJSON,
+		cfg.RelayerMovePrimaryTypeArgsJSON,
+		cfg.RelayerDryRun,
+	)
+	relayerUsecase := usecases.NewRelayerUsecase(
+		authRepository,
+		cryptoService,
+		relayerService,
+		cfg.RelayerMessageTemplate,
+		cfg.RelayerPrimaryMessageTemplate,
+	)
 	txUsecase := usecases.NewTxInteractor()
 
 	hub := controllers.NewWSHub()
-	authHandler := handler.NewAuthHandler(authUsecase, jwtService, hub)
+	wsOriginChecker := middlewares.WSOriginChecker(cfg.AllowedOrigins, cfg.AllowEmptyOriginForWS)
+	authHandler := handler.NewAuthHandler(authUsecase, jwtService, hub, initiaUsernameService, wsOriginChecker)
+	relayerHandler := handler.NewRelayerHandlerWithOriginChecker(relayerUsecase, hub, wsOriginChecker)
+	cardHandler, cardHandlerErr := handler.NewCardHandler(authRepository, cfg.CardFactoryRootPublicKey)
+	if cardHandlerErr != nil {
+		log.Fatalf("[bootstrap] invalid card factory root public key: %v", cardHandlerErr)
+	}
 	txController := controllers.NewTxController(txUsecase)
 
 	r := gin.New()
 	r.Use(middlewares.RecoveryWithStackTrace())
 	r.Use(middlewares.RequestLogger())
-	r.Use(cors.New(middlewares.CORS()))
+	r.Use(middlewares.SecurityHeaders())
+	r.Use(middlewares.RequestBodyLimit(cfg.MaxRequestBodyBytes))
+	r.Use(cors.New(middlewares.CORS(cfg.AllowedOrigins)))
 
 	v1 := r.Group("/v1")
-	routers.RegisterAuthRoutes(v1, authHandler)
-	routers.RegisterTxRoutes(v1, txController)
+	routers.RegisterRoutes(v1, authHandler, txController, relayerHandler, cardHandler)
+
+	apiV1 := r.Group("/api/v1")
+	routers.RegisterRoutes(apiV1, authHandler, txController, relayerHandler, cardHandler)
 
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true})

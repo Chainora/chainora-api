@@ -36,14 +36,26 @@ make abigen
 
 ## Bring Up Local Development Environment
 
-### Initialize Database Config
+### Initialize Module Config
 
-Use a single env file and set your database URL (Supabase/Render):
+Use module-local config files:
 
 ```bash
+# edit directly (already created in repo)
+vi ./src/rest/config/config.yaml
+vi ./src/worker/config/config.yaml
+
+# only migration env needs a private local file
 cp ./src/migration/config/.env.example ./src/migration/config/.env
-vi ./src/migration/config/.env
 ```
+
+Policy:
+- `src/rest/config/config.yaml` and `src/worker/config/config.yaml` are public, prefilled, non-secret config.
+- Sensitive values (JWT secret, DB URL, relayer private key) stay in hidden `src/migration/config/.env` and are loaded for runtime secrets.
+- REST security controls are configured in YAML under `security`:
+	- `allowed_origins`
+	- `max_request_body_bytes`
+	- `allow_empty_origin_for_ws`
 
 ### Run Setup Commands
 
@@ -58,6 +70,12 @@ Start API server:
 
 ```bash
 make rest
+```
+
+Run worker:
+
+```bash
+make worker
 ```
 
 ## Making Migrations
@@ -80,6 +98,12 @@ make migration MIGRATION_NAME=create_auth_sessions
 make abigen
 ```
 
+Generate bindings from ABI/BIN:
+
+```bash
+make abigen-gen ABI_FILE=path/to/Contract.abi BIN_FILE=path/to/Contract.bin OUT_FILE=src/adapter/ethclient/contract.go OUT_PKG=ethclient
+```
+
 ## Project Structure
 
 - `src/core`: domain entities, constants, properties, and usecases
@@ -97,4 +121,5 @@ make abigen
 
 - Current auth repository implementation is in-memory (`sync.Map`).
 - Signature verification uses EIP-191 + secp256k1 recovery and handles both `v=0/1` and `v=27/28`.
+- Username feature guide: `docs/USERNAME_FEATURE.md`.
 # chainora-api

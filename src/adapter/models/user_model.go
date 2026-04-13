@@ -9,32 +9,38 @@ import (
 
 // UserModel is the adapter-level user representation for repository reuse.
 type UserModel struct {
-	Address   string
-	Username  string
-	TCNR      string
-	KYCStatus string
-	PublicKey string
-	LastLogin time.Time
+	Address            string
+	Username           string
+	TCNR               string
+	KYCStatus          string
+	PublicKey          string
+	LastLogin          time.Time
+	GasSponsored       bool
+	IsHardwareVerified bool
 }
 
 func UserModelFromEntity(user entities.User) UserModel {
 	return UserModel{
-		Address:   strings.ToLower(strings.TrimSpace(user.Address)),
-		Username:  strings.TrimSpace(user.Username),
-		TCNR:      strings.TrimSpace(user.TCNR),
-		KYCStatus: strings.TrimSpace(user.KYCStatus),
-		PublicKey: strings.TrimSpace(user.PublicKey),
-		LastLogin: user.LastLogin,
+		Address:            strings.ToLower(strings.TrimSpace(user.Address)),
+		Username:           strings.TrimSpace(user.Username),
+		TCNR:               strings.TrimSpace(user.TCNR),
+		KYCStatus:          strings.TrimSpace(user.KYCStatus),
+		PublicKey:          strings.TrimSpace(user.PublicKey),
+		LastLogin:          user.LastLogin,
+		GasSponsored:       user.GasSponsored,
+		IsHardwareVerified: user.IsHardwareVerified,
 	}
 }
 
 func (m UserModel) ToEntity() entities.User {
 	return entities.User{
-		Address:   m.Address,
-		Username:  m.Username,
-		TCNR:      m.TCNR,
-		KYCStatus: m.KYCStatus,
-		PublicKey: m.PublicKey,
-		LastLogin: m.LastLogin,
+		Address:            m.Address,
+		Username:           m.Username,
+		TCNR:               m.TCNR,
+		KYCStatus:          m.KYCStatus,
+		PublicKey:          m.PublicKey,
+		LastLogin:          m.LastLogin,
+		GasSponsored:       m.GasSponsored,
+		IsHardwareVerified: m.IsHardwareVerified,
 	}
 }

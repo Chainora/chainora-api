@@ -39,6 +39,12 @@ func WriteError(ctx *gin.Context, err error) {
 		status = http.StatusUnauthorized
 	case errors.Is(err, constants.ErrUserNotFound):
 		status = http.StatusNotFound
+	case errors.Is(err, constants.ErrForbidden):
+		status = http.StatusForbidden
+	case errors.Is(err, constants.ErrRateLimited):
+		status = http.StatusTooManyRequests
+	case errors.Is(err, constants.ErrConflict):
+		status = http.StatusConflict
 	default:
 		var validationErrs validator.ValidationErrors
 		if errors.As(err, &validationErrs) {

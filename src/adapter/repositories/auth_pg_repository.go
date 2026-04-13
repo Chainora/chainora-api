@@ -96,11 +96,12 @@ func (r *PostgresAuthRepository) GetUser(address string) (entities.User, error) 
 
 	var user entities.User
 	if err := r.db.QueryRow(
-		`SELECT address, username, tcnr::text, kyc_status, public_key, COALESCE(last_login, NOW())
+		`SELECT address, username, tcnr::text, kyc_status, public_key, COALESCE(last_login_at, last_login, NOW()),
+		        COALESCE(gas_sponsored, false), COALESCE(is_hardware_verified, false)
 		 FROM users
 		 WHERE address = $1`,
 		key,
-	).Scan(&user.Address, &user.Username, &user.TCNR, &user.KYCStatus, &user.PublicKey, &user.LastLogin); err != nil {
+	).Scan(&user.Address, &user.Username, &user.TCNR, &user.KYCStatus, &user.PublicKey, &user.LastLogin, &user.GasSponsored, &user.IsHardwareVerified); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return entities.User{}, fmt.Errorf("get user: %w", constants.ErrUserNotFound)
 		}
@@ -110,10 +111,27 @@ func (r *PostgresAuthRepository) GetUser(address string) (entities.User, error) 
 	return user, nil
 }
 
-func (r *PostgresAuthRepository) UpdateUser(user entities.User) error {
+func (r *PostgresAuthRepository) UsernameExists(username string) (bool, error) {
+	trimmed := strings.TrimSpace(username)
+	if trimmed == "" {
+		return false, nil
+	}
+
+	var exists bool
+	if err := r.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM users WHERE LOWER(username) = LOWER($1))`,
+		trimmed,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("username exists: %w", err)
+	}
+
+	return exists, nil
+}
+
+func (r *PostgresAuthRepository) UpsertUser(user entities.User) error {
 	address := strings.ToLower(strings.TrimSpace(user.Address))
 	if address == "" {
-		return fmt.Errorf("update user: %w", constants.ErrUserNotFound)
+		return fmt.Errorf("upsert user: %w", constants.ErrUserNotFound)
 	}
 
 	if existing, err := r.GetUser(address); err == nil {
@@ -130,7 +148,7 @@ func (r *PostgresAuthRepository) UpdateUser(user entities.User) error {
 			user.PublicKey = existing.PublicKey
 		}
 	} else if !errors.Is(err, constants.ErrUserNotFound) {
-		return fmt.Errorf("update user: %w", err)
+		return fmt.Errorf("upsert user: %w", err)
 	}
 
 	if strings.TrimSpace(user.Username) == "" {
@@ -147,8 +165,8 @@ func (r *PostgresAuthRepository) UpdateUser(user entities.User) error {
 	}
 
 	_, err := r.db.Exec(
-		`INSERT INTO users (address, username, tcnr, kyc_status, public_key, last_login, created_at, updated_at)
-		 VALUES ($1, $2, $3::numeric, $4, $5, $6, NOW(), NOW())
+		`INSERT INTO users (address, username, tcnr, kyc_status, public_key, last_login, last_login_at, gas_sponsored, is_hardware_verified, created_at, updated_at)
+		 VALUES ($1, $2, $3::numeric, $4, $5, $6, $6, $7, $8, NOW(), NOW())
 		 ON CONFLICT (address)
 		 DO UPDATE SET
 		   username = EXCLUDED.username,
@@ -156,6 +174,9 @@ func (r *PostgresAuthRepository) UpdateUser(user entities.User) error {
 		   kyc_status = EXCLUDED.kyc_status,
 		   public_key = EXCLUDED.public_key,
 		   last_login = EXCLUDED.last_login,
+		   last_login_at = EXCLUDED.last_login_at,
+		   gas_sponsored = EXCLUDED.gas_sponsored,
+		   is_hardware_verified = EXCLUDED.is_hardware_verified,
 		   updated_at = NOW()`,
 		address,
 		strings.TrimSpace(user.Username),
@@ -163,10 +184,16 @@ func (r *PostgresAuthRepository) UpdateUser(user entities.User) error {
 		strings.TrimSpace(user.KYCStatus),
 		strings.TrimSpace(user.PublicKey),
 		user.LastLogin.UTC(),
+		user.GasSponsored,
+		user.IsHardwareVerified,
 	)
 	if err != nil {
-		return fmt.Errorf("update user: %w", err)
+		return fmt.Errorf("upsert user: %w", err)
 	}
 
 	return nil
+}
+
+func (r *PostgresAuthRepository) UpdateUser(user entities.User) error {
+	return r.UpsertUser(user)
 }

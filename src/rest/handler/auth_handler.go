@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"chainora-api/core/constants"
@@ -24,10 +26,19 @@ type AuthHandler struct {
 	refreshTokenUC  *refreshTokenUsecase
 	meUC            *meUsecase
 	getProfileUC    *getProfileUsecase
-	updateProfileUC *updateProfileUsecase
 }
 
-func NewAuthHandler(authUsecase usecases.AuthUsecase, issuer TokenIssuer, hub *controllers.WSHub) *AuthHandler {
+type UsernameResolver interface {
+	ResolvePrimaryUsername(ctx context.Context, address string) (string, error)
+}
+
+func NewAuthHandler(
+	authUsecase usecases.AuthUsecase,
+	issuer TokenIssuer,
+	hub *controllers.WSHub,
+	usernameResolver UsernameResolver,
+	wsOriginChecker func(r *http.Request) bool,
+) *AuthHandler {
 	validate := validator.New()
 
 	return &AuthHandler{
@@ -37,7 +48,7 @@ func NewAuthHandler(authUsecase usecases.AuthUsecase, issuer TokenIssuer, hub *c
 		waitForLoginUC: &waitForLoginUsecase{
 			auth:     authUsecase,
 			hub:      hub,
-			upgrader: defaultUpgrader(),
+			upgrader: defaultUpgrader(wsOriginChecker),
 			validate: validate,
 		},
 		progressLoginUC: &progressLoginUsecase{
@@ -63,11 +74,7 @@ func NewAuthHandler(authUsecase usecases.AuthUsecase, issuer TokenIssuer, hub *c
 			auth:     authUsecase,
 			issuer:   issuer,
 			validate: validate,
-		},
-		updateProfileUC: &updateProfileUsecase{
-			auth:     authUsecase,
-			issuer:   issuer,
-			validate: validate,
+			resolver: usernameResolver,
 		},
 	}
 }
@@ -148,7 +155,7 @@ func (h *AuthHandler) NotifyProgress(ctx *gin.Context) {
 // @Failure 410 {object} map[string]interface{}
 // @Router /v1/auth/verify [post]
 func (h *AuthHandler) VerifySignature(ctx *gin.Context) {
-	var req entityrequest.VerifySignatureRequest
+	var req entityrequest.SignInRequest
 	if err := requests.Serialize(ctx, &req); err != nil {
 		response.WriteError(ctx, err)
 		return
@@ -230,38 +237,6 @@ func (h *AuthHandler) GetProfile(ctx *gin.Context) {
 	}
 
 	resp, triggerErr := h.getProfileUC.Trigger(ctx, entityrequest.MeRequest{AccessToken: accessToken})
-	if triggerErr != nil {
-		response.WriteError(ctx, triggerErr)
-		return
-	}
-
-	response.Write(ctx.Writer, response.Ok(resp))
-}
-
-// UpdateProfile godoc
-// @Summary Update current profile
-// @Description Updates editable profile fields for authenticated user.
-// @Tags auth
-// @Accept json
-// @Produce json
-// @Success 200 {object} map[string]interface{}
-// @Failure 400 {object} map[string]interface{}
-// @Failure 401 {object} map[string]interface{}
-// @Router /v1/auth/profile [put]
-func (h *AuthHandler) UpdateProfile(ctx *gin.Context) {
-	accessToken, err := extractBearerToken(ctx.GetHeader("Authorization"))
-	if err != nil {
-		response.WriteError(ctx, err)
-		return
-	}
-
-	var req entityrequest.UpdateProfileRequest
-	if serializeErr := requests.Serialize(ctx, &req); serializeErr != nil {
-		response.WriteError(ctx, serializeErr)
-		return
-	}
-
-	resp, triggerErr := h.updateProfileUC.Trigger(ctx, accessToken, req)
 	if triggerErr != nil {
 		response.WriteError(ctx, triggerErr)
 		return

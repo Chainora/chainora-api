@@ -10,6 +10,7 @@ type InitSessionResponse struct {
 type VerifySignatureResponse struct {
 	Verified     bool   `json:"verified"`
 	Address      string `json:"address"`
+	Username     string `json:"username,omitempty"`
 	Token        string `json:"token"`
 	RefreshToken string `json:"refreshToken"`
 }
@@ -19,6 +20,7 @@ type WSLoginVerifiedEvent struct {
 	Status       string `json:"status"`
 	SessionID    string `json:"sessionId"`
 	Address      string `json:"address"`
+	Username     string `json:"username,omitempty"`
 	Token        string `json:"token"`
 	RefreshToken string `json:"refreshToken"`
 }

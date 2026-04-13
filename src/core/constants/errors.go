@@ -7,4 +7,7 @@ var (
 	ErrInvalidSignature = errors.New("invalid signature")
 	ErrUserNotFound     = errors.New("user not found")
 	ErrInvalidToken     = errors.New("invalid token")
+	ErrForbidden        = errors.New("forbidden")
+	ErrRateLimited      = errors.New("rate limited")
+	ErrConflict         = errors.New("conflict")
 )

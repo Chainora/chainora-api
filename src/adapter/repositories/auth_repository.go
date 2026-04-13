@@ -63,10 +63,35 @@ func (r *InMemoryAuthRepository) GetUser(address string) (entities.User, error) 
 	return model.ToEntity(), nil
 }
 
-func (r *InMemoryAuthRepository) UpdateUser(user entities.User) error {
+func (r *InMemoryAuthRepository) UsernameExists(username string) (bool, error) {
+	trimmed := strings.TrimSpace(username)
+	if trimmed == "" {
+		return false, nil
+	}
+
+	lowerUsername := strings.ToLower(trimmed)
+	exists := false
+	r.users.Range(func(_, value any) bool {
+		model, ok := value.(models.UserModel)
+		if !ok {
+			return true
+		}
+
+		if strings.ToLower(strings.TrimSpace(model.Username)) == lowerUsername {
+			exists = true
+			return false
+		}
+
+		return true
+	})
+
+	return exists, nil
+}
+
+func (r *InMemoryAuthRepository) UpsertUser(user entities.User) error {
 	address := strings.ToLower(strings.TrimSpace(user.Address))
 	if address == "" {
-		return fmt.Errorf("update user: %w", constants.ErrUserNotFound)
+		return fmt.Errorf("upsert user: %w", constants.ErrUserNotFound)
 	}
 
 	if existing, ok := r.users.Load(address); ok {
@@ -101,4 +126,8 @@ func (r *InMemoryAuthRepository) UpdateUser(user entities.User) error {
 
 	r.users.Store(address, models.UserModelFromEntity(user))
 	return nil
+}
+
+func (r *InMemoryAuthRepository) UpdateUser(user entities.User) error {
+	return r.UpsertUser(user)
 }

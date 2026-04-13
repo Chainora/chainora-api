@@ -27,6 +27,10 @@ Use this skill when a task needs precise requirement execution and prompt-to-cod
 - Keep EIP-191 signature verification compatibility.
 - Keep V handling compatible with 0/1 and 27/28.
 - Keep WebSocket session hub behavior deterministic.
+- Username source-of-truth is on-chain; avoid backend username edit paths.
+- For async contract logic, prefer `src/worker` job + scanner + orchestrator flow over ad-hoc goroutines in REST handlers.
+- Keep configuration module-local (`src/rest/config/config.yaml`, `src/worker/config/config.yaml`) instead of centralizing all runtime envs.
+- Primary username selection must remain signature-gated when exposed through relayer endpoints.
 
 ## Output Requirements
 - Requirement Coverage: each user requirement mapped to file-level changes.

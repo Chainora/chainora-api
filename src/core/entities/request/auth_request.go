@@ -8,13 +8,17 @@ type WaitForLoginRequest struct {
 	SessionID string `json:"sessionId" validate:"required"`
 }
 
-// VerifySignatureRequest is the API request for signature verification.
-type VerifySignatureRequest struct {
+// SignInRequest is the API request for QR sign-in verification.
+type SignInRequest struct {
 	SessionID string `json:"sessionId" validate:"required"`
 	Address   string `json:"address" validate:"required,startswith=0x,len=42"`
 	Signature string `json:"signature" validate:"required"`
+	Username  string `json:"username" validate:"omitempty,min=3,max=80"`
 	V         *int   `json:"v"`
 }
+
+// VerifySignatureRequest is kept as an alias for backward compatibility.
+type VerifySignatureRequest = SignInRequest
 
 // ProgressLoginRequest is the API request to broadcast login progress.
 type ProgressLoginRequest struct {

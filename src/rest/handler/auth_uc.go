@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -100,20 +101,17 @@ type getProfileUsecase struct {
 	auth     usecases.AuthUsecase
 	issuer   TokenIssuer
 	validate *validator.Validate
+	resolver interface {
+		ResolvePrimaryUsername(ctx context.Context, address string) (string, error)
+	}
 }
 
-type updateProfileUsecase struct {
-	auth     usecases.AuthUsecase
-	issuer   TokenIssuer
-	validate *validator.Validate
-}
-
-func (u *verifySignatureUsecase) Trigger(_ *gin.Context, req entityrequest.VerifySignatureRequest) (entityresponse.VerifySignatureResponse, error) {
+func (u *verifySignatureUsecase) Trigger(_ *gin.Context, req entityrequest.SignInRequest) (entityresponse.VerifySignatureResponse, error) {
 	if err := u.validate.Struct(req); err != nil {
 		return entityresponse.VerifySignatureResponse{}, err
 	}
 
-	user, err := u.auth.AuthenticateUser(req.SessionID, req.Address, req.Signature, req.V)
+	user, err := u.auth.AuthenticateUser(req.SessionID, req.Address, req.Signature, req.Username, req.V)
 	if err != nil {
 		return entityresponse.VerifySignatureResponse{}, err
 	}
@@ -127,6 +125,7 @@ func (u *verifySignatureUsecase) Trigger(_ *gin.Context, req entityrequest.Verif
 		Status:       "verified",
 		SessionID:    req.SessionID,
 		Address:      user.Address,
+		Username:     user.Username,
 		Token:        token,
 		RefreshToken: refreshToken,
 	})
@@ -139,6 +138,7 @@ func (u *verifySignatureUsecase) Trigger(_ *gin.Context, req entityrequest.Verif
 	return entityresponse.VerifySignatureResponse{
 		Verified:     true,
 		Address:      user.Address,
+		Username:     user.Username,
 		Token:        token,
 		RefreshToken: refreshToken,
 	}, nil
@@ -199,7 +199,7 @@ func (u *meUsecase) Trigger(_ *gin.Context, req entityrequest.MeRequest) (entity
 	}, nil
 }
 
-func (u *getProfileUsecase) Trigger(_ *gin.Context, req entityrequest.MeRequest) (entityresponse.ProfileResponse, error) {
+func (u *getProfileUsecase) Trigger(ctx *gin.Context, req entityrequest.MeRequest) (entityresponse.ProfileResponse, error) {
 	if err := u.validate.Struct(req); err != nil {
 		return entityresponse.ProfileResponse{}, err
 	}
@@ -214,45 +214,40 @@ func (u *getProfileUsecase) Trigger(_ *gin.Context, req entityrequest.MeRequest)
 		return entityresponse.ProfileResponse{}, err
 	}
 
+	username, err := u.resolveUsername(ctx.Request.Context(), user.Address)
+	if err != nil {
+		return entityresponse.ProfileResponse{}, err
+	}
+
 	return entityresponse.ProfileResponse{
 		Address:   user.Address,
-		Username:  user.Username,
+		Username:  strings.TrimSpace(username),
 		TCNR:      user.TCNR,
 		KYCStatus: user.KYCStatus,
 	}, nil
 }
 
-func (u *updateProfileUsecase) Trigger(
-	_ *gin.Context,
-	accessToken string,
-	req entityrequest.UpdateProfileRequest,
-) (entityresponse.ProfileResponse, error) {
-	if err := u.validate.Struct(req); err != nil {
-		return entityresponse.ProfileResponse{}, err
+func (u *getProfileUsecase) resolveUsername(ctx context.Context, address string) (string, error) {
+	if u.resolver == nil {
+		return "", nil
 	}
 
-	_, address, err := u.issuer.ParseAccessToken(accessToken)
+	username, err := u.resolver.ResolvePrimaryUsername(ctx, address)
 	if err != nil {
-		return entityresponse.ProfileResponse{}, err
+		return "", err
 	}
 
-	updated, err := u.auth.UpdateUserProfile(address, req.Username)
-	if err != nil {
-		return entityresponse.ProfileResponse{}, err
-	}
-
-	return entityresponse.ProfileResponse{
-		Address:   updated.Address,
-		Username:  updated.Username,
-		TCNR:      updated.TCNR,
-		KYCStatus: updated.KYCStatus,
-	}, nil
+	return strings.TrimSpace(username), nil
 }
 
 func newWaitForLoginRequest(rawSessionID string) entityrequest.WaitForLoginRequest {
 	return entityrequest.WaitForLoginRequest{SessionID: strings.TrimSpace(rawSessionID)}
 }
 
-func defaultUpgrader() websocket.Upgrader {
-	return websocket.Upgrader{CheckOrigin: func(_ *http.Request) bool { return true }}
+func defaultUpgrader(originChecker func(r *http.Request) bool) websocket.Upgrader {
+	if originChecker == nil {
+		originChecker = func(_ *http.Request) bool { return false }
+	}
+
+	return websocket.Upgrader{CheckOrigin: originChecker}
 }

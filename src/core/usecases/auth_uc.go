@@ -18,6 +18,8 @@ type AuthRepository interface {
 	SaveSession(session entities.AuthSession) error
 	GetSession(sessionID string) (entities.AuthSession, error)
 	GetUser(address string) (entities.User, error)
+	UsernameExists(username string) (bool, error)
+	UpsertUser(user entities.User) error
 	UpdateUser(user entities.User) error
 	DeleteSession(sessionID string) error
 }
@@ -38,9 +40,8 @@ type SignatureVerifier interface {
 type AuthUsecase interface {
 	GenerateLoginSession() (entities.AuthSession, error)
 	ValidateLoginSession(sessionID string) error
-	AuthenticateUser(sessionID, address, signatureHex string, recoveryV *int) (entities.User, error)
+	AuthenticateUser(sessionID, address, signatureHex, username string, recoveryV *int) (entities.User, error)
 	GetUserProfile(address string) (entities.User, error)
-	UpdateUserProfile(address, username string) (entities.User, error)
 }
 
 type authUsecase struct {
@@ -99,7 +100,7 @@ func (u *authUsecase) ValidateLoginSession(sessionID string) error {
 	return nil
 }
 
-func (u *authUsecase) AuthenticateUser(sessionID, address, signatureHex string, recoveryV *int) (entities.User, error) {
+func (u *authUsecase) AuthenticateUser(sessionID, address, signatureHex, username string, recoveryV *int) (entities.User, error) {
 	session, err := u.repo.GetSession(sessionID)
 	if err != nil {
 		return entities.User{}, fmt.Errorf("get session: %w", err)
@@ -131,15 +132,16 @@ func (u *authUsecase) AuthenticateUser(sessionID, address, signatureHex string, 
 
 	user := entities.User{
 		Address:   resolvedAddress,
+		Username:  strings.TrimSpace(username),
 		PublicKey: strings.TrimSpace(result.PublicKey),
 		LastLogin: u.now().UTC(),
 	}
 
-	if err := u.repo.UpdateUser(user); err != nil {
+	if err := u.repo.UpsertUser(user); err != nil {
 		if errors.Is(err, constants.ErrUserNotFound) {
 			return entities.User{}, constants.ErrUserNotFound
 		}
-		return entities.User{}, fmt.Errorf("update user: %w", err)
+		return entities.User{}, fmt.Errorf("upsert user: %w", err)
 	}
 
 	session.Address = user.Address
@@ -172,21 +174,3 @@ func (u *authUsecase) GetUserProfile(address string) (entities.User, error) {
 	return entities.User{}, constants.ErrUserNotFound
 }
 
-func (u *authUsecase) UpdateUserProfile(address, username string) (entities.User, error) {
-	trimmedUsername := strings.TrimSpace(username)
-	if trimmedUsername == "" {
-		return entities.User{}, fmt.Errorf("username is required")
-	}
-
-	user, err := u.GetUserProfile(address)
-	if err != nil {
-		return entities.User{}, err
-	}
-
-	user.Username = trimmedUsername
-	if err := u.repo.UpdateUser(user); err != nil {
-		return entities.User{}, fmt.Errorf("update user profile: %w", err)
-	}
-
-	return user, nil
-}
