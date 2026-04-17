@@ -38,5 +38,5 @@ type MeRequest struct {
 
 // UpdateProfileRequest is the API request to update current user profile.
 type UpdateProfileRequest struct {
-	Username string `json:"username" validate:"required,min=2,max=40"`
+	AvatarURL string `json:"avatarUrl" validate:"required,url,max=2048"`
 }

@@ -106,6 +106,22 @@ type getProfileUsecase struct {
 	}
 }
 
+type updateProfileUsecase struct {
+	auth     usecases.AuthUsecase
+	issuer   TokenIssuer
+	validate *validator.Validate
+}
+
+const placeholderUsername = "Chainora User"
+
+func normalizeProfileUsername(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if strings.EqualFold(trimmed, placeholderUsername) {
+		return ""
+	}
+	return trimmed
+}
+
 func (u *verifySignatureUsecase) Trigger(_ *gin.Context, req entityrequest.SignInRequest) (entityresponse.VerifySignatureResponse, error) {
 	if err := u.validate.Struct(req); err != nil {
 		return entityresponse.VerifySignatureResponse{}, err
@@ -214,16 +230,46 @@ func (u *getProfileUsecase) Trigger(ctx *gin.Context, req entityrequest.MeReques
 		return entityresponse.ProfileResponse{}, err
 	}
 
-	username, err := u.resolveUsername(ctx.Request.Context(), user.Address)
+	username := normalizeProfileUsername(user.Username)
+	resolvedUsername, resolveErr := u.resolveUsername(ctx.Request.Context(), user.Address)
+	if resolveErr == nil && normalizeProfileUsername(resolvedUsername) != "" {
+		username = normalizeProfileUsername(resolvedUsername)
+	}
+
+	return entityresponse.ProfileResponse{
+		Address:                       user.Address,
+		Username:                      username,
+		AvatarURL:                     strings.TrimSpace(user.AvatarURL),
+		UsernameCount:                 user.UsernameCount,
+		PrimarySelectionSponsoredUsed: user.PrimarySelectionSponsoredUsed,
+		TCNR:                          user.TCNR,
+		KYCStatus:                     user.KYCStatus,
+	}, nil
+}
+
+func (u *updateProfileUsecase) Trigger(_ *gin.Context, accessToken string, req entityrequest.UpdateProfileRequest) (entityresponse.ProfileResponse, error) {
+	if err := u.validate.Struct(req); err != nil {
+		return entityresponse.ProfileResponse{}, err
+	}
+
+	_, address, err := u.issuer.ParseAccessToken(accessToken)
 	if err != nil {
 		return entityresponse.ProfileResponse{}, err
 	}
 
+	user, updateErr := u.auth.UpdateUserAvatar(address, req.AvatarURL)
+	if updateErr != nil {
+		return entityresponse.ProfileResponse{}, updateErr
+	}
+
 	return entityresponse.ProfileResponse{
-		Address:   user.Address,
-		Username:  strings.TrimSpace(username),
-		TCNR:      user.TCNR,
-		KYCStatus: user.KYCStatus,
+		Address:                       user.Address,
+		Username:                      normalizeProfileUsername(user.Username),
+		AvatarURL:                     strings.TrimSpace(user.AvatarURL),
+		UsernameCount:                 user.UsernameCount,
+		PrimarySelectionSponsoredUsed: user.PrimarySelectionSponsoredUsed,
+		TCNR:                          user.TCNR,
+		KYCStatus:                     user.KYCStatus,
 	}, nil
 }
 

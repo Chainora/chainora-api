@@ -39,6 +39,8 @@ func WriteError(ctx *gin.Context, err error) {
 		status = http.StatusUnauthorized
 	case errors.Is(err, constants.ErrUserNotFound):
 		status = http.StatusNotFound
+	case errors.Is(err, constants.ErrNotFound):
+		status = http.StatusNotFound
 	case errors.Is(err, constants.ErrForbidden):
 		status = http.StatusForbidden
 	case errors.Is(err, constants.ErrRateLimited):

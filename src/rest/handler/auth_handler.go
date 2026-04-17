@@ -26,6 +26,7 @@ type AuthHandler struct {
 	refreshTokenUC  *refreshTokenUsecase
 	meUC            *meUsecase
 	getProfileUC    *getProfileUsecase
+	updateProfileUC *updateProfileUsecase
 }
 
 type UsernameResolver interface {
@@ -75,6 +76,11 @@ func NewAuthHandler(
 			issuer:   issuer,
 			validate: validate,
 			resolver: usernameResolver,
+		},
+		updateProfileUC: &updateProfileUsecase{
+			auth:     authUsecase,
+			issuer:   issuer,
+			validate: validate,
 		},
 	}
 }
@@ -237,6 +243,39 @@ func (h *AuthHandler) GetProfile(ctx *gin.Context) {
 	}
 
 	resp, triggerErr := h.getProfileUC.Trigger(ctx, entityrequest.MeRequest{AccessToken: accessToken})
+	if triggerErr != nil {
+		response.WriteError(ctx, triggerErr)
+		return
+	}
+
+	response.Write(ctx.Writer, response.Ok(resp))
+}
+
+// UpdateProfile godoc
+// @Summary Update current profile
+// @Description Updates mutable profile fields (currently avatarUrl) for authenticated user.
+// @Tags auth
+// @Accept json
+// @Produce json
+// @Param payload body request.UpdateProfileRequest true "Profile update payload"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]interface{}
+// @Failure 401 {object} map[string]interface{}
+// @Router /v1/auth/profile [patch]
+func (h *AuthHandler) UpdateProfile(ctx *gin.Context) {
+	accessToken, err := extractBearerToken(ctx.GetHeader("Authorization"))
+	if err != nil {
+		response.WriteError(ctx, err)
+		return
+	}
+
+	var req entityrequest.UpdateProfileRequest
+	if err := requests.Serialize(ctx, &req); err != nil {
+		response.WriteError(ctx, err)
+		return
+	}
+
+	resp, triggerErr := h.updateProfileUC.Trigger(ctx, accessToken, req)
 	if triggerErr != nil {
 		response.WriteError(ctx, triggerErr)
 		return

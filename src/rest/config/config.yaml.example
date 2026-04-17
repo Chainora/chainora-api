@@ -5,7 +5,7 @@ security:
   allowed_origins:
     - "http://localhost:5173"
     - "http://127.0.0.1:5173"
-  max_request_body_bytes: 1048576
+  max_request_body_bytes: 8388608
   allow_empty_origin_for_ws: false
 
 jwt:
@@ -18,8 +18,11 @@ auth:
   message_template: "Sign this to login to Chainora: %s"
 
 initia:
-  rpc_url: "http://23.94.63.207:8545"
+  rpc_url: "http://157.66.100.120:8545/"
   api_url: "https://api.testnet.initia.xyz"
+
+chainora:
+  rpc_url: "http://157.66.100.120:8545/"
 
 database:
   url: ""
@@ -49,3 +52,10 @@ relayer:
 
 card:
   factory_root_public_key: "043e5662949af3d3bdf8c226bdd8444098a14f8960870ccb5be55bbe098b363aadd06109c1c50cfcfb44f80ecd082fd1d00fc8de8c73ed521ad0bab962422f721a"
+  device_verifier_private_key: ""
+
+cloudinary:
+  cloud_name: ""
+  api_key: ""
+  api_secret: ""
+  upload_preset: ""

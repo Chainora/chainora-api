@@ -103,8 +103,17 @@ func (r *InMemoryAuthRepository) UpsertUser(user entities.User) error {
 		if strings.TrimSpace(user.Username) == "" {
 			user.Username = oldUser.Username
 		}
+		if strings.TrimSpace(user.AvatarURL) == "" {
+			user.AvatarURL = oldUser.AvatarURL
+		}
 		if strings.TrimSpace(user.TCNR) == "" {
 			user.TCNR = oldUser.TCNR
+		}
+		if user.UsernameCount == 0 {
+			user.UsernameCount = oldUser.UsernameCount
+		}
+		if !user.PrimarySelectionSponsoredUsed {
+			user.PrimarySelectionSponsoredUsed = oldUser.PrimarySelectionSponsoredUsed
 		}
 		if strings.TrimSpace(user.KYCStatus) == "" {
 			user.KYCStatus = oldUser.KYCStatus
@@ -114,14 +123,15 @@ func (r *InMemoryAuthRepository) UpsertUser(user entities.User) error {
 		}
 	}
 
-	if strings.TrimSpace(user.Username) == "" {
-		user.Username = "Chainora User"
-	}
+	user.Username = strings.TrimSpace(user.Username)
 	if strings.TrimSpace(user.TCNR) == "" {
 		user.TCNR = "0"
 	}
 	if strings.TrimSpace(user.KYCStatus) == "" {
 		user.KYCStatus = "unavailable"
+	}
+	if user.UsernameCount < 0 {
+		user.UsernameCount = 0
 	}
 
 	r.users.Store(address, models.UserModelFromEntity(user))

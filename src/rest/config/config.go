@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -40,6 +41,10 @@ type yamlConfig struct {
 		APIURL string `yaml:"api_url"`
 	} `yaml:"initia"`
 
+	Chainora struct {
+		RPCURL string `yaml:"rpc_url"`
+	} `yaml:"chainora"`
+
 	Database struct {
 		URL string `yaml:"url"`
 	} `yaml:"database"`
@@ -71,8 +76,16 @@ type yamlConfig struct {
 	} `yaml:"relayer"`
 
 	Card struct {
-		FactoryRootPublicKey string `yaml:"factory_root_public_key"`
+		FactoryRootPublicKey     string `yaml:"factory_root_public_key"`
+		DeviceVerifierPrivateKey string `yaml:"device_verifier_private_key"`
 	} `yaml:"card"`
+
+	Cloudinary struct {
+		CloudName    string `yaml:"cloud_name"`
+		APIKey       string `yaml:"api_key"`
+		APISecret    string `yaml:"api_secret"`
+		UploadPreset string `yaml:"upload_preset"`
+	} `yaml:"cloudinary"`
 }
 
 func Load() properties.AppProperties {
@@ -96,10 +109,41 @@ func Load() properties.AppProperties {
 		initiaAPI = "https://api.testnet.initia.xyz"
 	}
 
-	relayerNode := strings.TrimSpace(raw.Relayer.NodeURL)
+	chainoraRPC := secretString("CHAINORA_RPC_URL", strings.TrimSpace(raw.Chainora.RPCURL), initiaRPC)
+	relayerInitiadBinary := secretString("RELAYER_INITIAD_BINARY", strings.TrimSpace(raw.Relayer.InitiadBinary), "initiad")
+	relayerChainID := secretString("RELAYER_CHAIN_ID", strings.TrimSpace(raw.Relayer.ChainID), "")
+	relayerNode := secretString("RELAYER_NODE_URL", strings.TrimSpace(raw.Relayer.NodeURL), "")
 	if relayerNode == "" {
 		relayerNode = initiaRPC
 	}
+	relayerKeyName := secretString("RELAYER_KEY_NAME", strings.TrimSpace(raw.Relayer.KeyName), "master")
+	relayerKeyringBackend := secretString("RELAYER_KEYRING_BACKEND", strings.TrimSpace(raw.Relayer.KeyringBackend), "os")
+	relayerHome := secretString("RELAYER_HOME", strings.TrimSpace(raw.Relayer.Home), "")
+	relayerGasPrices := secretString("RELAYER_GAS_PRICES", strings.TrimSpace(raw.Relayer.GasPrices), "")
+	cloudName := secretString("CLOUDINARY_CLOUD_NAME", strings.TrimSpace(raw.Cloudinary.CloudName), "")
+	cloudAPIKey := secretString("CLOUDINARY_API_KEY", strings.TrimSpace(raw.Cloudinary.APIKey), "")
+	cloudAPISecret := secretString("CLOUDINARY_API_SECRET", strings.TrimSpace(raw.Cloudinary.APISecret), "")
+	uploadPreset := secretString("CLOUDINARY_UPLOAD_PRESET", strings.TrimSpace(raw.Cloudinary.UploadPreset), "")
+
+	if cloudURL := strings.TrimSpace(os.Getenv("CLOUDINARY_URL")); cloudURL != "" {
+		parsedCloudName, parsedAPIKey, parsedAPISecret := parseCloudinaryURL(cloudURL)
+		if cloudName == "" {
+			cloudName = parsedCloudName
+		}
+		if cloudAPIKey == "" {
+			cloudAPIKey = parsedAPIKey
+		}
+		if cloudAPISecret == "" {
+			cloudAPISecret = parsedAPISecret
+		}
+	}
+
+	relayerMasterPrivateKey := secretString("RELAYER_MASTER_PRIVATE_KEY", strings.TrimSpace(raw.Relayer.MasterPrivateKey), "")
+	cardDeviceVerifierPrivateKey := secretString(
+		"CARD_DEVICE_VERIFIER_PRIVATE_KEY",
+		strings.TrimSpace(raw.Card.DeviceVerifierPrivateKey),
+		relayerMasterPrivateKey,
+	)
 
 	return properties.AppProperties{
 		ServerPort:                     fallback(strings.TrimSpace(raw.Server.Port), "8080"),
@@ -113,18 +157,19 @@ func Load() properties.AppProperties {
 		AuthMessageTemplate:            fallback(strings.TrimSpace(raw.Auth.MessageTemplate), "Sign this to login to Chainora: %s"),
 		InitiaRPCURL:                   initiaRPC,
 		InitiaAPIURL:                   initiaAPI,
+		ChainoraRPCURL:                 chainoraRPC,
 		DBURL:                          secretString2("DB_URL", "DATABASE_URL", strings.TrimSpace(raw.Database.URL), ""),
-		RelayerMasterPrivateKey:        secretString("RELAYER_MASTER_PRIVATE_KEY", strings.TrimSpace(raw.Relayer.MasterPrivateKey), ""),
+		RelayerMasterPrivateKey:        relayerMasterPrivateKey,
 		RelayerMasterAddress:           secretString("RELAYER_MASTER_ADDRESS", strings.TrimSpace(raw.Relayer.MasterAddress), ""),
 		RelayerMessageTemplate:         fallback(strings.TrimSpace(raw.Relayer.MessageTemplate), "Register Chainora username '%s' (session: %s)"),
 		RelayerPrimaryMessageTemplate:  fallback(strings.TrimSpace(raw.Relayer.PrimaryMessageTemplate), "Set Chainora primary username '%s' (session: %s)"),
-		RelayerInitiadBinary:           fallback(strings.TrimSpace(raw.Relayer.InitiadBinary), "initiad"),
-		RelayerChainID:                 strings.TrimSpace(raw.Relayer.ChainID),
+		RelayerInitiadBinary:           relayerInitiadBinary,
+		RelayerChainID:                 relayerChainID,
 		RelayerNodeURL:                 relayerNode,
-		RelayerKeyName:                 fallback(strings.TrimSpace(raw.Relayer.KeyName), "master"),
-		RelayerKeyringBackend:          fallback(strings.TrimSpace(raw.Relayer.KeyringBackend), "os"),
-		RelayerHome:                    strings.TrimSpace(raw.Relayer.Home),
-		RelayerGasPrices:               strings.TrimSpace(raw.Relayer.GasPrices),
+		RelayerKeyName:                 relayerKeyName,
+		RelayerKeyringBackend:          relayerKeyringBackend,
+		RelayerHome:                    relayerHome,
+		RelayerGasPrices:               relayerGasPrices,
 		RelayerMoveModuleAddr:          strings.TrimSpace(raw.Relayer.Move.ModuleAddr),
 		RelayerMoveModuleName:          strings.TrimSpace(raw.Relayer.Move.ModuleName),
 		RelayerMoveFunctionName:        strings.TrimSpace(raw.Relayer.Move.FunctionName),
@@ -135,7 +180,33 @@ func Load() properties.AppProperties {
 		RelayerMovePrimaryTypeArgsJSON: strings.TrimSpace(raw.Relayer.Move.PrimaryTypeArgsJSON),
 		RelayerDryRun:                  raw.Relayer.DryRun,
 		CardFactoryRootPublicKey:       fallback(strings.TrimSpace(raw.Card.FactoryRootPublicKey), "043e5662949af3d3bdf8c226bdd8444098a14f8960870ccb5be55bbe098b363aadd06109c1c50cfcfb44f80ecd082fd1d00fc8de8c73ed521ad0bab962422f721a"),
+		CardDeviceVerifierPrivateKey:   cardDeviceVerifierPrivateKey,
+		CloudinaryCloudName:            cloudName,
+		CloudinaryAPIKey:               cloudAPIKey,
+		CloudinaryAPISecret:            cloudAPISecret,
+		CloudinaryUploadPreset:         uploadPreset,
 	}
+}
+
+func parseCloudinaryURL(raw string) (cloudName string, apiKey string, apiSecret string) {
+	parsedURL, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || parsedURL == nil {
+		return "", "", ""
+	}
+
+	if !strings.EqualFold(strings.TrimSpace(parsedURL.Scheme), "cloudinary") {
+		return "", "", ""
+	}
+
+	cloudName = strings.TrimSpace(parsedURL.Hostname())
+	if parsedURL.User != nil {
+		apiKey = strings.TrimSpace(parsedURL.User.Username())
+		if password, ok := parsedURL.User.Password(); ok {
+			apiSecret = strings.TrimSpace(password)
+		}
+	}
+
+	return cloudName, apiKey, apiSecret
 }
 
 func validatePublicConfig(raw yamlConfig) {
@@ -147,6 +218,12 @@ func validatePublicConfig(raw yamlConfig) {
 	}
 	if strings.TrimSpace(raw.Relayer.MasterPrivateKey) != "" {
 		panic("rest/config/config.yaml must not contain relayer.master_private_key; keep secrets in hidden env")
+	}
+	if strings.TrimSpace(raw.Card.DeviceVerifierPrivateKey) != "" {
+		panic("rest/config/config.yaml must not contain card.device_verifier_private_key; keep secrets in hidden env")
+	}
+	if strings.TrimSpace(raw.Cloudinary.APISecret) != "" {
+		panic("rest/config/config.yaml must not contain cloudinary.api_secret; keep secrets in hidden env")
 	}
 }
 
@@ -178,7 +255,7 @@ func normalizeOrigins(items []string) []string {
 
 func maxBodyBytes(value int64) int64 {
 	if value <= 0 {
-		return 1 << 20
+		return 8 << 20
 	}
 	return value
 }

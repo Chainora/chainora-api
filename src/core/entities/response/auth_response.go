@@ -46,8 +46,11 @@ type MeResponse struct {
 
 // ProfileResponse is returned from profile endpoints.
 type ProfileResponse struct {
-	Address   string `json:"address"`
-	Username  string `json:"username"`
-	TCNR      string `json:"tCNR"`
-	KYCStatus string `json:"kycStatus"`
+	Address                       string `json:"address"`
+	Username                      string `json:"username"`
+	AvatarURL                     string `json:"avatarUrl"`
+	UsernameCount                 int    `json:"usernameCount"`
+	PrimarySelectionSponsoredUsed bool   `json:"primarySelectionSponsoredUsed"`
+	TCNR                          string `json:"tCNR"`
+	KYCStatus                     string `json:"kycStatus"`
 }

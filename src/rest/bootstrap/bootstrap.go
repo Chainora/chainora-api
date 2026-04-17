@@ -33,6 +33,7 @@ type App struct {
 func Build() *App {
 	cfg := restconfig.Load()
 
+	var dbConn *sql.DB
 	var authRepository usecases.AuthRepository = repositories.NewInMemoryAuthRepository()
 	if dbURL := strings.TrimSpace(cfg.DBURL); dbURL != "" {
 		db, err := sql.Open("postgres", dbURL)
@@ -42,6 +43,7 @@ func Build() *App {
 			log.Printf("[bootstrap] failed to ping postgres, fallback to in-memory auth repository: %v", pingErr)
 			_ = db.Close()
 		} else {
+			dbConn = db
 			authRepository = repositories.NewPostgresAuthRepository(db)
 			log.Printf("[bootstrap] using postgres auth repository")
 		}
@@ -86,10 +88,24 @@ func Build() *App {
 	wsOriginChecker := middlewares.WSOriginChecker(cfg.AllowedOrigins, cfg.AllowEmptyOriginForWS)
 	authHandler := handler.NewAuthHandler(authUsecase, jwtService, hub, initiaUsernameService, wsOriginChecker)
 	relayerHandler := handler.NewRelayerHandlerWithOriginChecker(relayerUsecase, hub, wsOriginChecker)
-	cardHandler, cardHandlerErr := handler.NewCardHandler(authRepository, cfg.CardFactoryRootPublicKey)
+	cardHandler, cardHandlerErr := handler.NewCardHandler(
+		authRepository,
+		cfg.CardFactoryRootPublicKey,
+		cfg.ChainoraRPCURL,
+		cfg.CardDeviceVerifierPrivateKey,
+	)
 	if cardHandlerErr != nil {
 		log.Fatalf("[bootstrap] invalid card factory root public key: %v", cardHandlerErr)
 	}
+	groupHandler := handler.NewGroupHandler(dbConn, jwtService, cfg.ChainoraRPCURL)
+	mediaHandler := handler.NewMediaHandler(
+		jwtService,
+		cfg.CloudinaryCloudName,
+		cfg.CloudinaryAPIKey,
+		cfg.CloudinaryAPISecret,
+		cfg.CloudinaryUploadPreset,
+	)
+	notificationHandler := handler.NewNotificationHandler(dbConn, jwtService)
 	txController := controllers.NewTxController(txUsecase)
 
 	r := gin.New()
@@ -100,10 +116,10 @@ func Build() *App {
 	r.Use(cors.New(middlewares.CORS(cfg.AllowedOrigins)))
 
 	v1 := r.Group("/v1")
-	routers.RegisterRoutes(v1, authHandler, txController, relayerHandler, cardHandler)
+	routers.RegisterRoutes(v1, authHandler, txController, relayerHandler, cardHandler, groupHandler, mediaHandler, notificationHandler)
 
 	apiV1 := r.Group("/api/v1")
-	routers.RegisterRoutes(apiV1, authHandler, txController, relayerHandler, cardHandler)
+	routers.RegisterRoutes(apiV1, authHandler, txController, relayerHandler, cardHandler, groupHandler, mediaHandler, notificationHandler)
 
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true})

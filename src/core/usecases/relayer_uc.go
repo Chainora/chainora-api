@@ -17,6 +17,9 @@ import (
 
 var usernamePattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{3,20}$`)
 
+const maxSponsoredUsernameRegistrations = 1
+const maxSponsoredPrimaryReselections = 1
+
 type UsernameRelayerService interface {
 	RegisterUsername(ctx context.Context, address string, username string) (string, error)
 	SetPrimaryUsername(ctx context.Context, address string, username string) (string, error)
@@ -116,6 +119,17 @@ func (u *relayerUsecase) CreateUnsignedPayload(
 		return entityresponse.UnsignedTxPayloadResponse{}, err
 	}
 
+	user, userErr := u.repo.GetUser(address)
+	if userErr != nil {
+		return entityresponse.UnsignedTxPayloadResponse{}, userErr
+	}
+	if user.UsernameCount > 0 {
+		return entityresponse.UnsignedTxPayloadResponse{}, fmt.Errorf(
+			"%w: this wallet already registered a username",
+			constants.ErrForbidden,
+		)
+	}
+
 	if err := u.enforceRateLimit(address, requestKey); err != nil {
 		return entityresponse.UnsignedTxPayloadResponse{}, err
 	}
@@ -157,6 +171,24 @@ func (u *relayerUsecase) CreatePrimaryPayload(
 
 	if err := u.enforceRateLimit(address, requestKey); err != nil {
 		return entityresponse.UnsignedTxPayloadResponse{}, err
+	}
+
+	user, userErr := u.repo.GetUser(address)
+	if userErr != nil {
+		return entityresponse.UnsignedTxPayloadResponse{}, userErr
+	}
+	if user.UsernameCount <= 1 {
+		return entityresponse.UnsignedTxPayloadResponse{}, fmt.Errorf(
+			"%w: primary-name reselection is available after registering at least 2 usernames",
+			constants.ErrForbidden,
+		)
+	}
+	if user.PrimarySelectionSponsoredUsed {
+		return entityresponse.UnsignedTxPayloadResponse{}, fmt.Errorf(
+			"%w: sponsor limit reached (max %d primary-name reselection)",
+			constants.ErrForbidden,
+			maxSponsoredPrimaryReselections,
+		)
 	}
 
 	sessionID, err := generateSessionID()
@@ -222,8 +254,11 @@ func (u *relayerUsecase) RegisterUsername(
 	if err != nil {
 		return entityresponse.RegisterUsernameRelayerResponse{}, err
 	}
-	if user.GasSponsored {
-		return entityresponse.RegisterUsernameRelayerResponse{}, fmt.Errorf("%w: gas sponsorship already used", constants.ErrForbidden)
+	if user.UsernameCount >= maxSponsoredUsernameRegistrations {
+		return entityresponse.RegisterUsernameRelayerResponse{}, fmt.Errorf(
+			"%w: this wallet already registered a username",
+			constants.ErrForbidden,
+		)
 	}
 
 	exists, existsErr := u.repo.UsernameExists(username)
@@ -248,8 +283,25 @@ func (u *relayerUsecase) RegisterUsername(
 		return entityresponse.RegisterUsernameRelayerResponse{}, mapRelayerExecutionError(relayErr)
 	}
 
-	user.Username = username
-	user.GasSponsored = true
+	isFirstUsername := user.UsernameCount == 0
+	if isFirstUsername {
+		if _, setPrimaryErr := u.relayer.SetPrimaryUsername(ctx, address, username); setPrimaryErr != nil {
+			return entityresponse.RegisterUsernameRelayerResponse{}, fmt.Errorf(
+				"register succeeded but auto set primary failed: %w",
+				mapRelayerExecutionError(setPrimaryErr),
+			)
+		}
+	}
+
+	if strings.TrimSpace(user.Username) == "" || isFirstUsername {
+		// First username becomes primary by default.
+		user.Username = username
+	}
+	user.UsernameCount++
+	if user.UsernameCount < 0 {
+		user.UsernameCount = 0
+	}
+	user.GasSponsored = user.UsernameCount >= maxSponsoredUsernameRegistrations
 	user.IsHardwareVerified = true
 	user.PublicKey = strings.TrimSpace(verification.PublicKey)
 	if updateErr := u.repo.UpdateUser(user); updateErr != nil {
@@ -307,6 +359,19 @@ func (u *relayerUsecase) SetPrimaryUsername(
 	if err != nil {
 		return entityresponse.SetPrimaryUsernameRelayerResponse{}, err
 	}
+	if user.UsernameCount <= 1 {
+		return entityresponse.SetPrimaryUsernameRelayerResponse{}, fmt.Errorf(
+			"%w: primary-name reselection is available after registering at least 2 usernames",
+			constants.ErrForbidden,
+		)
+	}
+	if user.PrimarySelectionSponsoredUsed {
+		return entityresponse.SetPrimaryUsernameRelayerResponse{}, fmt.Errorf(
+			"%w: sponsor limit reached (max %d primary-name reselection)",
+			constants.ErrForbidden,
+			maxSponsoredPrimaryReselections,
+		)
+	}
 
 	message := u.BuildPrimaryRelayerMessage(username, sessionID)
 	verification, verifyErr := u.verifier.VerifyEIP191Signature(message, address, req.Signature, req.V)
@@ -323,6 +388,11 @@ func (u *relayerUsecase) SetPrimaryUsername(
 	}
 
 	user.Username = username
+	user.PrimarySelectionSponsoredUsed = true
+	if user.UsernameCount < 0 {
+		user.UsernameCount = 0
+	}
+	user.GasSponsored = user.UsernameCount >= maxSponsoredUsernameRegistrations
 	user.IsHardwareVerified = true
 	user.PublicKey = strings.TrimSpace(verification.PublicKey)
 	if updateErr := u.repo.UpdateUser(user); updateErr != nil {
@@ -380,6 +450,12 @@ func mapRelayerExecutionError(err error) error {
 	msg := strings.ToLower(strings.TrimSpace(err.Error()))
 	if strings.Contains(msg, "::usernames") && strings.Contains(msg, "code=524292") {
 		return fmt.Errorf("%w: username is already registered on chain", constants.ErrConflict)
+	}
+	if strings.Contains(msg, "unknown address") && strings.Contains(msg, "account init") {
+		return fmt.Errorf(
+			"relayer account not found on configured node: verify RELAYER_NODE_URL, RELAYER_CHAIN_ID, and funded init account (%w)",
+			err,
+		)
 	}
 
 	return err

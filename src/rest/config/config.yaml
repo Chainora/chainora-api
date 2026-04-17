@@ -18,8 +18,11 @@ auth:
   message_template: "Sign this to login to Chainora: %s"
 
 initia:
-  rpc_url: "http://23.94.63.207:8545"
+  rpc_url: "http://157.66.100.120:8545/"
   api_url: "https://api.testnet.initia.xyz"
+
+chainora:
+  rpc_url: "http://157.66.100.120:8545/"
 
 database:
   url: ""
@@ -30,8 +33,8 @@ relayer:
   message_template: "Register Chainora username '%s' (session: %s)"
   primary_message_template: "Set Chainora primary username '%s' (session: %s)"
   initiad_binary: "initiad"
-  chain_id: ""
-  node_url: ""
+  chain_id: "initiation-2"
+  node_url: "https://rpc.testnet.initia.xyz:443"
   key_name: "master"
   keyring_backend: "os"
   home: ""
@@ -49,3 +52,4 @@ relayer:
 
 card:
   factory_root_public_key: "043e5662949af3d3bdf8c226bdd8444098a14f8960870ccb5be55bbe098b363aadd06109c1c50cfcfb44f80ecd082fd1d00fc8de8c73ed521ad0bab962422f721a"
+  device_verifier_private_key: ""

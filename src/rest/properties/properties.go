@@ -15,6 +15,7 @@ type AppProperties struct {
 	AuthMessageTemplate            string
 	InitiaRPCURL                   string
 	InitiaAPIURL                   string
+	ChainoraRPCURL                 string
 	DBURL                          string
 	RelayerMasterPrivateKey        string
 	RelayerMasterAddress           string
@@ -37,4 +38,9 @@ type AppProperties struct {
 	RelayerMovePrimaryTypeArgsJSON string
 	RelayerDryRun                  bool
 	CardFactoryRootPublicKey       string
+	CardDeviceVerifierPrivateKey   string
+	CloudinaryCloudName            string
+	CloudinaryAPIKey               string
+	CloudinaryAPISecret            string
+	CloudinaryUploadPreset         string
 }

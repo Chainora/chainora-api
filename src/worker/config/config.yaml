@@ -8,5 +8,8 @@ scheduler:
   scan_interval_seconds: 60
   request_timeout_seconds: 6
 
+database:
+  url: ""
+
 username_sync:
   addresses: []

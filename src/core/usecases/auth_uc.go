@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -42,6 +43,7 @@ type AuthUsecase interface {
 	ValidateLoginSession(sessionID string) error
 	AuthenticateUser(sessionID, address, signatureHex, username string, recoveryV *int) (entities.User, error)
 	GetUserProfile(address string) (entities.User, error)
+	UpdateUserAvatar(address, avatarURL string) (entities.User, error)
 }
 
 type authUsecase struct {
@@ -174,3 +176,50 @@ func (u *authUsecase) GetUserProfile(address string) (entities.User, error) {
 	return entities.User{}, constants.ErrUserNotFound
 }
 
+func (u *authUsecase) UpdateUserAvatar(address, avatarURL string) (entities.User, error) {
+	resolvedAddress := strings.ToLower(strings.TrimSpace(address))
+	if resolvedAddress == "" {
+		return entities.User{}, constants.ErrUserNotFound
+	}
+
+	resolvedAvatarURL := strings.TrimSpace(avatarURL)
+	if resolvedAvatarURL == "" {
+		return entities.User{}, fmt.Errorf("avatarUrl is required")
+	}
+
+	parsedURL, parseErr := url.Parse(resolvedAvatarURL)
+	if parseErr != nil || parsedURL == nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
+		return entities.User{}, fmt.Errorf("avatarUrl must be a valid URL")
+	}
+
+	scheme := strings.ToLower(strings.TrimSpace(parsedURL.Scheme))
+	if scheme != "http" && scheme != "https" {
+		return entities.User{}, fmt.Errorf("avatarUrl scheme must be http or https")
+	}
+
+	user, err := u.repo.GetUser(resolvedAddress)
+	if err != nil {
+		if !errors.Is(err, constants.ErrUserNotFound) {
+			return entities.User{}, fmt.Errorf("get user: %w", err)
+		}
+
+		user = entities.User{Address: resolvedAddress, LastLogin: u.now().UTC()}
+	}
+
+	user.Address = resolvedAddress
+	user.AvatarURL = resolvedAvatarURL
+	if user.LastLogin.IsZero() {
+		user.LastLogin = u.now().UTC()
+	}
+
+	if upsertErr := u.repo.UpsertUser(user); upsertErr != nil {
+		return entities.User{}, fmt.Errorf("update avatar: %w", upsertErr)
+	}
+
+	updated, updatedErr := u.repo.GetUser(resolvedAddress)
+	if updatedErr == nil {
+		return updated, nil
+	}
+
+	return user, nil
+}
