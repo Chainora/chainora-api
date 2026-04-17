@@ -24,6 +24,7 @@ type fakeNotificationDBDriver struct {
 	listRows     [][]driver.Value
 	unreadCount  int64
 	markReadRow  []driver.Value
+	markAllCount int64
 	lastArgsByOp map[string][]driver.NamedValue
 }
 
@@ -97,6 +98,11 @@ func (c *fakeNotificationDBConn) QueryContext(_ context.Context, query string, a
 		c.driver.setArgs("list", args)
 		return &fakeNotificationRows{
 			values: c.driver.cloneListRows(),
+		}, nil
+	case strings.Contains(normalized, "with updated as"):
+		c.driver.setArgs("read_all", args)
+		return &fakeNotificationRows{
+			values: [][]driver.Value{{c.driver.markAllCount}},
 		}, nil
 	case strings.Contains(normalized, "select count(1)") && strings.Contains(normalized, "from notifications"):
 		c.driver.setArgs("count", args)
@@ -192,7 +198,7 @@ func TestListNotificationsCanonicalizesUserAddress(t *testing.T) {
 		},
 	}
 
-	ctx, recorder := newJSONContext(http.MethodGet, "/v1/notifications?limit=20", "")
+	ctx, recorder := newJSONContext(http.MethodGet, "/v1/notifications?limit=1", "")
 	ctx.Request.Header.Set("Authorization", "Bearer test-token")
 
 	handler.ListNotifications(ctx)
@@ -206,12 +212,16 @@ func TestListNotificationsCanonicalizesUserAddress(t *testing.T) {
 		t.Fatalf("expected success response, got error %s", envelope.Error)
 	}
 
-	var items []notificationItem
-	if err := json.Unmarshal(envelope.Data, &items); err != nil {
+	var payload notificationListEnvelope
+	if err := json.Unmarshal(envelope.Data, &payload); err != nil {
 		t.Fatalf("decode notifications: %v", err)
 	}
+	items := payload.Items
 	if len(items) != 1 {
 		t.Fatalf("expected 1 notification, got %d", len(items))
+	}
+	if payload.NextCursor == "" {
+		t.Fatalf("expected non-empty next cursor for full page")
 	}
 
 	expectedAddress := strings.ToLower(testEVMAddress)
@@ -283,5 +293,64 @@ func TestUnreadCountAndMarkRead(t *testing.T) {
 	}
 	if got := dbDriver.argAsString("mark", 1); got != expectedAddress {
 		t.Fatalf("expected mark query canonical address %s, got %s", expectedAddress, got)
+	}
+}
+
+func TestMarkReadAll(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler, dbDriver := newTestNotificationHandler(t, fakeTokenIssuer{address: testInitAddress})
+	dbDriver.markAllCount = 4
+
+	readAllCtx, readAllRecorder := newJSONContext(http.MethodPatch, "/v1/notifications/read-all", "")
+	readAllCtx.Request.Header.Set("Authorization", "Bearer test-token")
+
+	handler.MarkReadAll(readAllCtx)
+
+	if readAllRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", readAllRecorder.Code, readAllRecorder.Body.String())
+	}
+
+	envelope := decodeNotificationEnvelope(t, readAllRecorder.Body.String())
+	if !envelope.Success {
+		t.Fatalf("expected success response, got error %s", envelope.Error)
+	}
+
+	var payload notificationReadAllResult
+	if err := json.Unmarshal(envelope.Data, &payload); err != nil {
+		t.Fatalf("decode read-all payload: %v", err)
+	}
+	if payload.UpdatedCount != 4 {
+		t.Fatalf("expected updated count 4, got %d", payload.UpdatedCount)
+	}
+
+	expectedAddress := strings.ToLower(testEVMAddress)
+	if got := dbDriver.argAsString("read_all", 0); got != expectedAddress {
+		t.Fatalf("expected read-all canonical address %s, got %s", expectedAddress, got)
+	}
+}
+
+func TestNotificationCursorRoundTrip(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	expected := notificationCursor{
+		CreatedAt: now,
+		ID:        testNotificationID,
+	}
+	encoded := encodeNotificationCursor(expected)
+	if strings.TrimSpace(encoded) == "" {
+		t.Fatalf("expected encoded cursor")
+	}
+
+	decoded, err := decodeNotificationCursor(encoded)
+	if err != nil {
+		t.Fatalf("decode cursor: %v", err)
+	}
+	if decoded == nil {
+		t.Fatalf("expected decoded cursor")
+	}
+	if !decoded.CreatedAt.Equal(now) {
+		t.Fatalf("expected created_at %s, got %s", now, decoded.CreatedAt)
+	}
+	if decoded.ID != expected.ID {
+		t.Fatalf("expected id %s, got %s", expected.ID, decoded.ID)
 	}
 }

@@ -65,35 +65,39 @@ type listGroupsRequest struct {
 }
 
 type groupItem struct {
-	PoolID             string `json:"poolId"`
-	PoolAddress        string `json:"poolAddress"`
-	CreatorAddress     string `json:"creatorAddress"`
-	Name               string `json:"name"`
-	Description        string `json:"description"`
-	GroupImageURL      string `json:"groupImageUrl"`
-	PublicRecruitment  bool   `json:"publicRecruitment"`
-	ContributionAmount string `json:"contributionAmount"`
-	TargetMembers      int    `json:"targetMembers"`
-	PeriodDuration     int    `json:"periodDuration"`
-	ContributionWindow int    `json:"contributionWindow"`
-	AuctionWindow      int    `json:"auctionWindow"`
-	Status             int    `json:"status"`
-	CurrentCycle       string `json:"currentCycle"`
-	CurrentPeriod      string `json:"currentPeriod"`
-	ActiveMemberCount  int    `json:"activeMemberCount"`
-	CycleCompleted     bool   `json:"cycleCompleted"`
-	TxHash             string `json:"txHash"`
-	LastSyncedAt       string `json:"lastSyncedAt,omitempty"`
-	CreatedAt          string `json:"createdAt"`
-	UpdatedAt          string `json:"updatedAt"`
+	PoolID              string `json:"poolId"`
+	PoolAddress         string `json:"poolAddress"`
+	CreatorAddress      string `json:"creatorAddress"`
+	Name                string `json:"name"`
+	Description         string `json:"description"`
+	GroupImageURL       string `json:"groupImageUrl"`
+	PublicRecruitment   bool   `json:"publicRecruitment"`
+	ContributionAmount  string `json:"contributionAmount"`
+	TargetMembers       int    `json:"targetMembers"`
+	PeriodDuration      int    `json:"periodDuration"`
+	ContributionWindow  int    `json:"contributionWindow"`
+	AuctionWindow       int    `json:"auctionWindow"`
+	Status              int    `json:"status"`
+	CurrentPeriodStatus int    `json:"currentPeriodStatus"`
+	Phase               string `json:"phase"`
+	CurrentCycle        string `json:"currentCycle"`
+	CurrentPeriod       string `json:"currentPeriod"`
+	ActiveMemberCount   int    `json:"activeMemberCount"`
+	CycleCompleted      bool   `json:"cycleCompleted"`
+	TxHash              string `json:"txHash"`
+	LastSyncedAt        string `json:"lastSyncedAt,omitempty"`
+	CreatedAt           string `json:"createdAt"`
+	UpdatedAt           string `json:"updatedAt"`
 }
 
 type poolState struct {
-	Status            int
-	CurrentCycle      string
-	CurrentPeriod     string
-	ActiveMemberCount int
-	CycleCompleted    bool
+	Status              int
+	CurrentPeriodStatus int
+	Phase               string
+	CurrentCycle        string
+	CurrentPeriod       string
+	ActiveMemberCount   int
+	CycleCompleted      bool
 }
 
 type poolStateReader struct {
@@ -481,6 +485,7 @@ func (h *GroupHandler) queryGroups(
 		        contribution_window,
 		        auction_window,
 		        status,
+		        current_period_status,
 		        current_cycle::text,
 		        current_period::text,
 		        active_member_count,
@@ -528,6 +533,7 @@ func (h *GroupHandler) queryGroups(
 			&item.ContributionWindow,
 			&item.AuctionWindow,
 			&item.Status,
+			&item.CurrentPeriodStatus,
 			&item.CurrentCycle,
 			&item.CurrentPeriod,
 			&item.ActiveMemberCount,
@@ -545,6 +551,7 @@ func (h *GroupHandler) queryGroups(
 		if lastSyncedAt.Valid {
 			item.LastSyncedAt = lastSyncedAt.Time.UTC().Format(time.RFC3339)
 		}
+		item.Phase = deriveLifecyclePhase(item.Status, item.CurrentPeriodStatus)
 
 		items = append(items, item)
 	}
@@ -637,6 +644,7 @@ func (h *GroupHandler) upsertGroup(
 			contribution_window,
 			auction_window,
 			status,
+			current_period_status,
 			current_cycle::text,
 			current_period::text,
 			active_member_count,
@@ -672,6 +680,7 @@ func (h *GroupHandler) upsertGroup(
 		&item.ContributionWindow,
 		&item.AuctionWindow,
 		&item.Status,
+		&item.CurrentPeriodStatus,
 		&item.CurrentCycle,
 		&item.CurrentPeriod,
 		&item.ActiveMemberCount,
@@ -688,6 +697,7 @@ func (h *GroupHandler) upsertGroup(
 	if lastSyncedAt.Valid {
 		item.LastSyncedAt = lastSyncedAt.Time.UTC().Format(time.RFC3339)
 	}
+	item.Phase = deriveLifecyclePhase(item.Status, item.CurrentPeriodStatus)
 	item.CreatedAt = createdAt.UTC().Format(time.RFC3339)
 	item.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
 
@@ -715,6 +725,7 @@ func (h *GroupHandler) queryGroupByPoolID(ctx *gin.Context, poolID string) (grou
 		        contribution_window,
 		        auction_window,
 		        status,
+		        current_period_status,
 		        current_cycle::text,
 		        current_period::text,
 		        active_member_count,
@@ -741,6 +752,7 @@ func (h *GroupHandler) queryGroupByPoolID(ctx *gin.Context, poolID string) (grou
 		&item.ContributionWindow,
 		&item.AuctionWindow,
 		&item.Status,
+		&item.CurrentPeriodStatus,
 		&item.CurrentCycle,
 		&item.CurrentPeriod,
 		&item.ActiveMemberCount,
@@ -762,6 +774,7 @@ func (h *GroupHandler) queryGroupByPoolID(ctx *gin.Context, poolID string) (grou
 	if lastSyncedAt.Valid {
 		item.LastSyncedAt = lastSyncedAt.Time.UTC().Format(time.RFC3339)
 	}
+	item.Phase = deriveLifecyclePhase(item.Status, item.CurrentPeriodStatus)
 
 	return item, nil
 }
@@ -853,14 +866,16 @@ func (h *GroupHandler) refreshGroupState(ctx context.Context, item groupItem) (g
 		ctx,
 		`UPDATE groups
 		 SET status = $1,
-		     current_cycle = $2::numeric,
-		     current_period = $3::numeric,
-		     active_member_count = $4,
-		     cycle_completed = $5,
-		     last_synced_at = $6,
+		     current_period_status = $2,
+		     current_cycle = $3::numeric,
+		     current_period = $4::numeric,
+		     active_member_count = $5,
+		     cycle_completed = $6,
+		     last_synced_at = $7,
 		     updated_at = NOW()
-		 WHERE pool_address = $7`,
+		 WHERE pool_address = $8`,
 		state.Status,
+		state.CurrentPeriodStatus,
 		state.CurrentCycle,
 		state.CurrentPeriod,
 		state.ActiveMemberCount,
@@ -873,6 +888,8 @@ func (h *GroupHandler) refreshGroupState(ctx context.Context, item groupItem) (g
 	}
 
 	item.Status = state.Status
+	item.CurrentPeriodStatus = state.CurrentPeriodStatus
+	item.Phase = state.Phase
 	item.CurrentCycle = state.CurrentCycle
 	item.CurrentPeriod = state.CurrentPeriod
 	item.ActiveMemberCount = state.ActiveMemberCount
@@ -896,6 +913,30 @@ func isStale(lastSyncedAt string, now time.Time) bool {
 	return now.Sub(parsed.UTC()) >= groupStateSyncInterval
 }
 
+func deriveLifecyclePhase(poolStatus int, periodStatus int) string {
+	switch poolStatus {
+	case 0:
+		return "Forming"
+	case 2:
+		return "Completed/Archived"
+	case 1:
+		switch periodStatus {
+		case 0:
+			return "Funding"
+		case 1:
+			return "Bidding"
+		case 2:
+			return "Jumping/Payout"
+		case 3:
+			return "Period Ended"
+		default:
+			return "Funding"
+		}
+	default:
+		return "Unknown"
+	}
+}
+
 func newPoolStateReader(rpcURL string) *poolStateReader {
 	url := strings.TrimSpace(rpcURL)
 	if url == "" {
@@ -913,7 +954,8 @@ func newPoolStateReader(rpcURL string) *poolStateReader {
 		{"type":"function","name":"currentCycle","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
 		{"type":"function","name":"currentPeriod","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
 		{"type":"function","name":"activeMemberCount","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
-		{"type":"function","name":"cycleCompleted","stateMutability":"view","inputs":[],"outputs":[{"type":"bool"}]}
+		{"type":"function","name":"cycleCompleted","stateMutability":"view","inputs":[],"outputs":[{"type":"bool"}]},
+		{"type":"function","name":"periodInfo","stateMutability":"view","inputs":[{"type":"uint256"},{"type":"uint256"}],"outputs":[{"type":"uint8"},{"type":"uint64"},{"type":"uint64"},{"type":"uint64"},{"type":"address"},{"type":"address"},{"type":"uint256"},{"type":"uint256"},{"type":"uint256"},{"type":"bool"},{"type":"bytes32"}]}
 	]`))
 	if parseErr != nil {
 		client.Close()
@@ -981,17 +1023,38 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 		return poolState{}, errors.New("invalid cycleCompleted value")
 	}
 
+	currentPeriodStatusValue := 0
+	if statusValue == 1 && currentCycleValue.Sign() > 0 && currentPeriodValue.Sign() > 0 {
+		periodInfoRaw, periodErr := r.call(
+			ctx,
+			address,
+			"periodInfo",
+			new(big.Int).Set(currentCycleValue),
+			new(big.Int).Set(currentPeriodValue),
+		)
+		if periodErr == nil && len(periodInfoRaw) > 0 {
+			switch value := periodInfoRaw[0].(type) {
+			case uint8:
+				currentPeriodStatusValue = int(value)
+			case *big.Int:
+				currentPeriodStatusValue = int(value.Int64())
+			}
+		}
+	}
+
 	return poolState{
-		Status:            int(statusValue),
-		CurrentCycle:      currentCycleValue.String(),
-		CurrentPeriod:     currentPeriodValue.String(),
-		ActiveMemberCount: int(activeMemberCountValue.Int64()),
-		CycleCompleted:    cycleCompletedValue,
+		Status:              int(statusValue),
+		CurrentPeriodStatus: currentPeriodStatusValue,
+		Phase:               deriveLifecyclePhase(int(statusValue), currentPeriodStatusValue),
+		CurrentCycle:        currentCycleValue.String(),
+		CurrentPeriod:       currentPeriodValue.String(),
+		ActiveMemberCount:   int(activeMemberCountValue.Int64()),
+		CycleCompleted:      cycleCompletedValue,
 	}, nil
 }
 
-func (r *poolStateReader) call(ctx context.Context, poolAddress common.Address, method string) ([]any, error) {
-	callData, err := r.poolABI.Pack(method)
+func (r *poolStateReader) call(ctx context.Context, poolAddress common.Address, method string, args ...any) ([]any, error) {
+	callData, err := r.poolABI.Pack(method, args...)
 	if err != nil {
 		return nil, fmt.Errorf("pack %s: %w", method, err)
 	}

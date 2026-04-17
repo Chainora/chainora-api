@@ -1,7 +1,9 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
@@ -16,6 +18,7 @@ import (
 const (
 	defaultNotificationsLimit = 50
 	maxNotificationsLimit     = 200
+	notificationQueryTimeout  = 2200 * time.Millisecond
 )
 
 type NotificationHandler struct {
@@ -37,6 +40,20 @@ type notificationItem struct {
 
 type notificationUnreadCount struct {
 	Count int `json:"count"`
+}
+
+type notificationListEnvelope struct {
+	Items      []notificationItem `json:"items"`
+	NextCursor string             `json:"nextCursor,omitempty"`
+}
+
+type notificationReadAllResult struct {
+	UpdatedCount int `json:"updatedCount"`
+}
+
+type notificationCursor struct {
+	CreatedAt time.Time
+	ID        string
 }
 
 func NewNotificationHandler(db *sql.DB, issuer TokenIssuer) *NotificationHandler {
@@ -71,24 +88,61 @@ func (h *NotificationHandler) ListNotifications(ctx *gin.Context) {
 		limit = maxNotificationsLimit
 	}
 
-	rows, queryErr := h.db.QueryContext(
-		ctx.Request.Context(),
-		`SELECT id::text,
-		        user_address,
-		        type,
-		        title,
-		        message,
-		        COALESCE(group_id::text, ''),
-		        action_url,
-		        is_read,
-		        created_at
-		 FROM notifications
-		 WHERE user_address = $1
-		 ORDER BY created_at DESC
-		 LIMIT $2`,
-		strings.ToLower(strings.TrimSpace(address)),
-		limit,
-	)
+	cursor, cursorErr := decodeNotificationCursor(strings.TrimSpace(ctx.Query("cursor")))
+	if cursorErr != nil {
+		response.WriteError(ctx, fmt.Errorf("invalid notifications cursor: %w", cursorErr))
+		return
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx.Request.Context(), notificationQueryTimeout)
+	defer cancel()
+
+	normalizedAddress := strings.ToLower(strings.TrimSpace(address))
+
+	var rows *sql.Rows
+	var queryErr error
+	if cursor == nil {
+		rows, queryErr = h.db.QueryContext(
+			queryCtx,
+			`SELECT id::text,
+			        user_address,
+			        type,
+			        title,
+			        message,
+			        COALESCE(group_id::text, ''),
+			        action_url,
+			        is_read,
+			        created_at
+			 FROM notifications
+			 WHERE user_address = $1
+			 ORDER BY created_at DESC, id DESC
+			 LIMIT $2`,
+			normalizedAddress,
+			limit,
+		)
+	} else {
+		rows, queryErr = h.db.QueryContext(
+			queryCtx,
+			`SELECT id::text,
+			        user_address,
+			        type,
+			        title,
+			        message,
+			        COALESCE(group_id::text, ''),
+			        action_url,
+			        is_read,
+			        created_at
+			 FROM notifications
+			 WHERE user_address = $1
+			   AND (created_at, id) < ($2, $3::uuid)
+			 ORDER BY created_at DESC, id DESC
+			 LIMIT $4`,
+			normalizedAddress,
+			cursor.CreatedAt.UTC(),
+			cursor.ID,
+			limit,
+		)
+	}
 	if queryErr != nil {
 		response.WriteError(ctx, fmt.Errorf("list notifications: %w", queryErr))
 		return
@@ -96,6 +150,8 @@ func (h *NotificationHandler) ListNotifications(ctx *gin.Context) {
 	defer rows.Close()
 
 	items := make([]notificationItem, 0)
+	var lastRowCreatedAt time.Time
+	var lastRowID string
 	for rows.Next() {
 		var item notificationItem
 		var createdAt time.Time
@@ -115,6 +171,8 @@ func (h *NotificationHandler) ListNotifications(ctx *gin.Context) {
 		}
 		item.CreatedAt = createdAt.UTC().Format(time.RFC3339)
 		items = append(items, item)
+		lastRowCreatedAt = createdAt.UTC()
+		lastRowID = item.ID
 	}
 
 	if rowsErr := rows.Err(); rowsErr != nil {
@@ -122,7 +180,18 @@ func (h *NotificationHandler) ListNotifications(ctx *gin.Context) {
 		return
 	}
 
-	response.Write(ctx.Writer, response.Ok(items))
+	nextCursor := ""
+	if len(items) == limit && !lastRowCreatedAt.IsZero() && strings.TrimSpace(lastRowID) != "" {
+		nextCursor = encodeNotificationCursor(notificationCursor{
+			CreatedAt: lastRowCreatedAt,
+			ID:        lastRowID,
+		})
+	}
+
+	response.Write(ctx.Writer, response.Ok(notificationListEnvelope{
+		Items:      items,
+		NextCursor: nextCursor,
+	}))
 }
 
 func (h *NotificationHandler) UnreadCount(ctx *gin.Context) {
@@ -137,9 +206,12 @@ func (h *NotificationHandler) UnreadCount(ctx *gin.Context) {
 		return
 	}
 
+	queryCtx, cancel := context.WithTimeout(ctx.Request.Context(), notificationQueryTimeout)
+	defer cancel()
+
 	var count int
 	queryErr := h.db.QueryRowContext(
-		ctx.Request.Context(),
+		queryCtx,
 		`SELECT COUNT(1)
 		 FROM notifications
 		 WHERE user_address = $1
@@ -166,6 +238,9 @@ func (h *NotificationHandler) MarkRead(ctx *gin.Context) {
 		return
 	}
 
+	queryCtx, cancel := context.WithTimeout(ctx.Request.Context(), notificationQueryTimeout)
+	defer cancel()
+
 	notificationID := strings.TrimSpace(ctx.Param("id"))
 	if notificationID == "" {
 		response.WriteError(ctx, fmt.Errorf("notification id is required"))
@@ -175,7 +250,7 @@ func (h *NotificationHandler) MarkRead(ctx *gin.Context) {
 	item := notificationItem{}
 	var createdAt time.Time
 	updateErr := h.db.QueryRowContext(
-		ctx.Request.Context(),
+		queryCtx,
 		`UPDATE notifications
 		 SET is_read = TRUE,
 		     read_at = COALESCE(read_at, NOW())
@@ -216,6 +291,43 @@ func (h *NotificationHandler) MarkRead(ctx *gin.Context) {
 	response.Write(ctx.Writer, response.Ok(item))
 }
 
+func (h *NotificationHandler) MarkReadAll(ctx *gin.Context) {
+	if h.db == nil {
+		response.WriteError(ctx, fmt.Errorf("notifications storage unavailable: %w", constants.ErrForbidden))
+		return
+	}
+
+	address, err := h.authenticatedAddress(ctx)
+	if err != nil {
+		response.WriteError(ctx, err)
+		return
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx.Request.Context(), notificationQueryTimeout)
+	defer cancel()
+
+	var updatedCount int
+	updateErr := h.db.QueryRowContext(
+		queryCtx,
+		`WITH updated AS (
+			UPDATE notifications
+			SET is_read = TRUE,
+			    read_at = COALESCE(read_at, NOW())
+			WHERE user_address = $1
+			  AND is_read = FALSE
+			RETURNING 1
+		)
+		SELECT COUNT(1) FROM updated`,
+		strings.ToLower(strings.TrimSpace(address)),
+	).Scan(&updatedCount)
+	if updateErr != nil {
+		response.WriteError(ctx, fmt.Errorf("mark all notifications as read: %w", updateErr))
+		return
+	}
+
+	response.Write(ctx.Writer, response.Ok(notificationReadAllResult{UpdatedCount: updatedCount}))
+}
+
 func (h *NotificationHandler) authenticatedAddress(ctx *gin.Context) (string, error) {
 	token, err := extractBearerToken(ctx.GetHeader("Authorization"))
 	if err != nil {
@@ -233,4 +345,41 @@ func (h *NotificationHandler) authenticatedAddress(ctx *gin.Context) (string, er
 	}
 
 	return canonical, nil
+}
+
+func decodeNotificationCursor(raw string) (*notificationCursor, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+
+	decodedBytes, err := base64.RawURLEncoding.DecodeString(trimmed)
+	if err != nil {
+		return nil, err
+	}
+
+	parts := strings.SplitN(string(decodedBytes), "|", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("cursor format mismatch")
+	}
+
+	parsedTime, parseErr := time.Parse(time.RFC3339Nano, strings.TrimSpace(parts[0]))
+	if parseErr != nil {
+		return nil, parseErr
+	}
+
+	id := strings.TrimSpace(parts[1])
+	if id == "" {
+		return nil, fmt.Errorf("cursor id is empty")
+	}
+
+	return &notificationCursor{
+		CreatedAt: parsedTime.UTC(),
+		ID:        id,
+	}, nil
+}
+
+func encodeNotificationCursor(cursor notificationCursor) string {
+	payload := fmt.Sprintf("%s|%s", cursor.CreatedAt.UTC().Format(time.RFC3339Nano), strings.TrimSpace(cursor.ID))
+	return base64.RawURLEncoding.EncodeToString([]byte(payload))
 }

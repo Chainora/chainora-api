@@ -54,5 +54,6 @@ func RegisterRoutes(
 	notifications := v1.Group("/notifications")
 	notifications.GET("", notificationHandler.ListNotifications)
 	notifications.GET("/unread-count", notificationHandler.UnreadCount)
+	notifications.PATCH("/read-all", notificationHandler.MarkReadAll)
 	notifications.PATCH("/:id/read", notificationHandler.MarkRead)
 }

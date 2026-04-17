@@ -6,9 +6,11 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"chainora-api/adapter/repositories"
 	"chainora-api/adapter/services"
+	"chainora-api/core/dbpool"
 	"chainora-api/core/properties"
 	"chainora-api/core/usecases"
 	restconfig "chainora-api/rest/config"
@@ -43,6 +45,19 @@ func Build() *App {
 			log.Printf("[bootstrap] failed to ping postgres, fallback to in-memory auth repository: %v", pingErr)
 			_ = db.Close()
 		} else {
+			poolSettings := dbpool.ConfigureFromEnv(db, dbpool.Settings{
+				MaxOpenConns:    24,
+				MaxIdleConns:    8,
+				ConnMaxLifetime: 30 * time.Minute,
+				ConnMaxIdleTime: 5 * time.Minute,
+			})
+			log.Printf(
+				"[bootstrap] postgres pool configured max_open=%d max_idle=%d max_lifetime=%s max_idle_time=%s",
+				poolSettings.MaxOpenConns,
+				poolSettings.MaxIdleConns,
+				poolSettings.ConnMaxLifetime,
+				poolSettings.ConnMaxIdleTime,
+			)
 			dbConn = db
 			authRepository = repositories.NewPostgresAuthRepository(db)
 			log.Printf("[bootstrap] using postgres auth repository")

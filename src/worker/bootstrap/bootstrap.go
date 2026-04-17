@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"chainora-api/core/dbpool"
 	"chainora-api/worker/config"
 	"chainora-api/worker/jobs"
 	"chainora-api/worker/orchestrators"
@@ -44,6 +45,19 @@ func Build(cfg config.Config) *App {
 				log.Printf("[worker] postgres ping failed for dynamic username sync source: %v", pingErr)
 				_ = postgresDB.Close()
 			} else {
+				poolSettings := dbpool.ConfigureFromEnv(postgresDB, dbpool.Settings{
+					MaxOpenConns:    10,
+					MaxIdleConns:    4,
+					ConnMaxLifetime: 20 * time.Minute,
+					ConnMaxIdleTime: 4 * time.Minute,
+				})
+				log.Printf(
+					"[worker] postgres pool configured max_open=%d max_idle=%d max_lifetime=%s max_idle_time=%s",
+					poolSettings.MaxOpenConns,
+					poolSettings.MaxIdleConns,
+					poolSettings.ConnMaxLifetime,
+					poolSettings.ConnMaxIdleTime,
+				)
 				db = postgresDB
 				addressSource = sources.NewPostgresAddressSource(db)
 				log.Printf("[worker] username-sync dynamic source enabled via postgres")

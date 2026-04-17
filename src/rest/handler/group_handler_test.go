@@ -118,6 +118,7 @@ func (c *fakeGroupDBConn) QueryContext(_ context.Context, query string, args []d
 		contributionWindow,
 		auctionWindow,
 		int64(0),
+		int64(0),
 		"0",
 		"0",
 		int64(1),
