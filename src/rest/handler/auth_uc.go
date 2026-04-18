@@ -3,11 +3,13 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
 
+	"chainora-api/core/constants"
 	entityrequest "chainora-api/core/entities/request"
 	entityresponse "chainora-api/core/entities/response"
 	"chainora-api/core/usecases"
@@ -98,6 +100,15 @@ type meUsecase struct {
 }
 
 type getProfileUsecase struct {
+	auth     usecases.AuthUsecase
+	issuer   TokenIssuer
+	validate *validator.Validate
+	resolver interface {
+		ResolvePrimaryUsername(ctx context.Context, address string) (string, error)
+	}
+}
+
+type listProfilesUsecase struct {
 	auth     usecases.AuthUsecase
 	issuer   TokenIssuer
 	validate *validator.Validate
@@ -247,6 +258,51 @@ func (u *getProfileUsecase) Trigger(ctx *gin.Context, req entityrequest.MeReques
 	}, nil
 }
 
+func (u *listProfilesUsecase) Trigger(ctx *gin.Context, accessToken string, addresses []string) ([]entityresponse.BasicProfileResponse, error) {
+	if strings.TrimSpace(accessToken) == "" {
+		return nil, fmt.Errorf("%w: missing bearer token", constants.ErrInvalidToken)
+	}
+
+	if _, _, err := u.issuer.ParseAccessToken(accessToken); err != nil {
+		return nil, err
+	}
+
+	normalizedAddresses := normalizeAddressList(addresses)
+	if len(normalizedAddresses) == 0 {
+		return nil, fmt.Errorf("at least one valid address is required")
+	}
+
+	if len(normalizedAddresses) > 120 {
+		return nil, fmt.Errorf("too many addresses: max 120")
+	}
+
+	profiles := make([]entityresponse.BasicProfileResponse, 0, len(normalizedAddresses))
+	for _, address := range normalizedAddresses {
+		profile := entityresponse.BasicProfileResponse{
+			Address:   address,
+			Username:  "",
+			AvatarURL: "",
+		}
+
+		user, err := u.auth.GetUserProfile(address)
+		if err == nil {
+			profile.Username = normalizeProfileUsername(user.Username)
+			profile.AvatarURL = strings.TrimSpace(user.AvatarURL)
+		} else if !errors.Is(err, constants.ErrUserNotFound) {
+			return nil, err
+		}
+
+		resolvedUsername, resolveErr := u.resolveUsername(ctx.Request.Context(), address)
+		if resolveErr == nil && normalizeProfileUsername(resolvedUsername) != "" {
+			profile.Username = normalizeProfileUsername(resolvedUsername)
+		}
+
+		profiles = append(profiles, profile)
+	}
+
+	return profiles, nil
+}
+
 func (u *updateProfileUsecase) Trigger(_ *gin.Context, accessToken string, req entityrequest.UpdateProfileRequest) (entityresponse.ProfileResponse, error) {
 	if err := u.validate.Struct(req); err != nil {
 		return entityresponse.ProfileResponse{}, err
@@ -284,6 +340,64 @@ func (u *getProfileUsecase) resolveUsername(ctx context.Context, address string)
 	}
 
 	return strings.TrimSpace(username), nil
+}
+
+func (u *listProfilesUsecase) resolveUsername(ctx context.Context, address string) (string, error) {
+	if u.resolver == nil {
+		return "", nil
+	}
+
+	username, err := u.resolver.ResolvePrimaryUsername(ctx, address)
+	if err != nil {
+		return "", err
+	}
+
+	return strings.TrimSpace(username), nil
+}
+
+func normalizeAddressList(rawAddresses []string) []string {
+	out := make([]string, 0, len(rawAddresses))
+	seen := make(map[string]struct{}, len(rawAddresses))
+
+	for _, chunk := range rawAddresses {
+		for _, candidate := range strings.Split(chunk, ",") {
+			normalized := strings.ToLower(strings.TrimSpace(candidate))
+			if normalized == "" {
+				continue
+			}
+
+			if !strings.HasPrefix(normalized, "0x") {
+				normalized = "0x" + normalized
+			}
+
+			if !isLikelyEVMAddress(normalized) {
+				continue
+			}
+
+			if _, exists := seen[normalized]; exists {
+				continue
+			}
+
+			seen[normalized] = struct{}{}
+			out = append(out, normalized)
+		}
+	}
+
+	return out
+}
+
+func isLikelyEVMAddress(value string) bool {
+	if !strings.HasPrefix(value, "0x") || len(value) != 42 {
+		return false
+	}
+
+	for _, ch := range value[2:] {
+		if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+			return false
+		}
+	}
+
+	return true
 }
 
 func newWaitForLoginRequest(rawSessionID string) entityrequest.WaitForLoginRequest {

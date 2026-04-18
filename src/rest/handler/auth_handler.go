@@ -26,6 +26,7 @@ type AuthHandler struct {
 	refreshTokenUC  *refreshTokenUsecase
 	meUC            *meUsecase
 	getProfileUC    *getProfileUsecase
+	listProfilesUC  *listProfilesUsecase
 	updateProfileUC *updateProfileUsecase
 }
 
@@ -72,6 +73,12 @@ func NewAuthHandler(
 			validate: validate,
 		},
 		getProfileUC: &getProfileUsecase{
+			auth:     authUsecase,
+			issuer:   issuer,
+			validate: validate,
+			resolver: usernameResolver,
+		},
+		listProfilesUC: &listProfilesUsecase{
 			auth:     authUsecase,
 			issuer:   issuer,
 			validate: validate,
@@ -243,6 +250,44 @@ func (h *AuthHandler) GetProfile(ctx *gin.Context) {
 	}
 
 	resp, triggerErr := h.getProfileUC.Trigger(ctx, entityrequest.MeRequest{AccessToken: accessToken})
+	if triggerErr != nil {
+		response.WriteError(ctx, triggerErr)
+		return
+	}
+
+	response.Write(ctx.Writer, response.Ok(resp))
+}
+
+// ListProfiles godoc
+// @Summary List basic profiles by wallet addresses
+// @Description Returns profile fields (address, username, avatarUrl) for a batch of wallet addresses.
+// @Tags auth
+// @Produce json
+// @Param addresses query string false "Comma-separated EVM addresses"
+// @Param address query []string false "Repeatable address query param"
+// @Success 200 {object} map[string]interface{}
+// @Failure 400 {object} map[string]interface{}
+// @Failure 401 {object} map[string]interface{}
+// @Router /v1/auth/profiles [get]
+func (h *AuthHandler) ListProfiles(ctx *gin.Context) {
+	accessToken, err := extractBearerToken(ctx.GetHeader("Authorization"))
+	if err != nil {
+		response.WriteError(ctx, err)
+		return
+	}
+
+	rawAddresses := make([]string, 0, 1+len(ctx.QueryArray("address")))
+	if addressesParam := strings.TrimSpace(ctx.Query("addresses")); addressesParam != "" {
+		rawAddresses = append(rawAddresses, addressesParam)
+	}
+	rawAddresses = append(rawAddresses, ctx.QueryArray("address")...)
+
+	if len(rawAddresses) == 0 {
+		response.WriteError(ctx, fmt.Errorf("addresses query is required"))
+		return
+	}
+
+	resp, triggerErr := h.listProfilesUC.Trigger(ctx, accessToken, rawAddresses)
 	if triggerErr != nil {
 		response.WriteError(ctx, triggerErr)
 		return

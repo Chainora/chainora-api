@@ -22,6 +22,7 @@ func RegisterRoutes(
 	auth.GET("/ws/:sessionId", authHandler.WaitForLoginWS)
 	auth.GET("/me", authHandler.Me)
 	auth.GET("/profile", authHandler.GetProfile)
+	auth.GET("/profiles", authHandler.ListProfiles)
 	auth.PATCH("/profile", authHandler.UpdateProfile)
 	auth.POST("/progress", authHandler.NotifyProgress)
 	auth.POST("/verify", authHandler.VerifySignature)
@@ -45,6 +46,7 @@ func RegisterRoutes(
 
 	groups := v1.Group("/groups")
 	groups.GET("", groupHandler.ListGroups)
+	groups.GET("/:poolId/view", groupHandler.GetGroupView)
 	groups.GET("/:poolId", groupHandler.GetGroup)
 	groups.POST("", groupHandler.CreateGroup)
 

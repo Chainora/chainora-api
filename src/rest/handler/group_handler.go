@@ -80,10 +80,15 @@ type groupItem struct {
 	Status              int    `json:"status"`
 	CurrentPeriodStatus int    `json:"currentPeriodStatus"`
 	Phase               string `json:"phase"`
+	GroupStatus         string `json:"groupStatus,omitempty"`
 	CurrentCycle        string `json:"currentCycle"`
 	CurrentPeriod       string `json:"currentPeriod"`
 	ActiveMemberCount   int    `json:"activeMemberCount"`
 	CycleCompleted      bool   `json:"cycleCompleted"`
+	ExtendVoteOpen      bool   `json:"extendVoteOpen,omitempty"`
+	ExtendVoteRound     string `json:"extendVoteRound,omitempty"`
+	ExtendYesVotes      string `json:"extendYesVotes,omitempty"`
+	ExtendRequiredVotes int    `json:"extendRequiredVotes,omitempty"`
 	TxHash              string `json:"txHash"`
 	LastSyncedAt        string `json:"lastSyncedAt,omitempty"`
 	CreatedAt           string `json:"createdAt"`
@@ -94,10 +99,16 @@ type poolState struct {
 	Status              int
 	CurrentPeriodStatus int
 	Phase               string
+	GroupStatus         string
 	CurrentCycle        string
 	CurrentPeriod       string
+	PublicRecruitment   bool
 	ActiveMemberCount   int
 	CycleCompleted      bool
+	ExtendVoteOpen      bool
+	ExtendVoteRound     string
+	ExtendYesVotes      string
+	ExtendRequiredVotes int
 }
 
 type poolStateReader struct {
@@ -551,7 +562,7 @@ func (h *GroupHandler) queryGroups(
 		if lastSyncedAt.Valid {
 			item.LastSyncedAt = lastSyncedAt.Time.UTC().Format(time.RFC3339)
 		}
-		item.Phase = deriveLifecyclePhase(item.Status, item.CurrentPeriodStatus)
+		applyLifecycleMetadata(&item)
 
 		items = append(items, item)
 	}
@@ -697,7 +708,7 @@ func (h *GroupHandler) upsertGroup(
 	if lastSyncedAt.Valid {
 		item.LastSyncedAt = lastSyncedAt.Time.UTC().Format(time.RFC3339)
 	}
-	item.Phase = deriveLifecyclePhase(item.Status, item.CurrentPeriodStatus)
+	applyLifecycleMetadata(&item)
 	item.CreatedAt = createdAt.UTC().Format(time.RFC3339)
 	item.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
 
@@ -774,7 +785,7 @@ func (h *GroupHandler) queryGroupByPoolID(ctx *gin.Context, poolID string) (grou
 	if lastSyncedAt.Valid {
 		item.LastSyncedAt = lastSyncedAt.Time.UTC().Format(time.RFC3339)
 	}
-	item.Phase = deriveLifecyclePhase(item.Status, item.CurrentPeriodStatus)
+	applyLifecycleMetadata(&item)
 
 	return item, nil
 }
@@ -871,15 +882,17 @@ func (h *GroupHandler) refreshGroupState(ctx context.Context, item groupItem) (g
 		     current_period = $4::numeric,
 		     active_member_count = $5,
 		     cycle_completed = $6,
-		     last_synced_at = $7,
+		     public_recruitment = $7,
+		     last_synced_at = $8,
 		     updated_at = NOW()
-		 WHERE pool_address = $8`,
+		 WHERE pool_address = $9`,
 		state.Status,
 		state.CurrentPeriodStatus,
 		state.CurrentCycle,
 		state.CurrentPeriod,
 		state.ActiveMemberCount,
 		state.CycleCompleted,
+		state.PublicRecruitment,
 		now,
 		strings.ToLower(strings.TrimSpace(item.PoolAddress)),
 	)
@@ -890,10 +903,16 @@ func (h *GroupHandler) refreshGroupState(ctx context.Context, item groupItem) (g
 	item.Status = state.Status
 	item.CurrentPeriodStatus = state.CurrentPeriodStatus
 	item.Phase = state.Phase
+	item.GroupStatus = state.GroupStatus
 	item.CurrentCycle = state.CurrentCycle
 	item.CurrentPeriod = state.CurrentPeriod
+	item.PublicRecruitment = state.PublicRecruitment
 	item.ActiveMemberCount = state.ActiveMemberCount
 	item.CycleCompleted = state.CycleCompleted
+	item.ExtendVoteOpen = state.ExtendVoteOpen
+	item.ExtendVoteRound = state.ExtendVoteRound
+	item.ExtendYesVotes = state.ExtendYesVotes
+	item.ExtendRequiredVotes = state.ExtendRequiredVotes
 	item.LastSyncedAt = now.Format(time.RFC3339)
 	item.UpdatedAt = now.Format(time.RFC3339)
 
@@ -913,28 +932,70 @@ func isStale(lastSyncedAt string, now time.Time) bool {
 	return now.Sub(parsed.UTC()) >= groupStateSyncInterval
 }
 
-func deriveLifecyclePhase(poolStatus int, periodStatus int) string {
+func deriveGroupStatus(poolStatus int, periodStatus int, cycleCompleted bool, extendVoteOpen bool) string {
 	switch poolStatus {
 	case 0:
-		return "Forming"
+		return "forming"
 	case 2:
-		return "Completed/Archived"
+		return "archived"
 	case 1:
+		if cycleCompleted && extendVoteOpen {
+			return "voting_extension"
+		}
 		switch periodStatus {
 		case 0:
-			return "Funding"
+			return "funding"
 		case 1:
-			return "Bidding"
+			return "bidding"
 		case 2:
-			return "Jumping/Payout"
+			return "payout"
 		case 3:
-			return "Period Ended"
+			return "ended_period"
 		default:
-			return "Funding"
+			return "active"
 		}
 	default:
-		return "Unknown"
+		return "active"
 	}
+}
+
+func lifecyclePhaseLabel(groupStatus string) string {
+	switch strings.ToLower(strings.TrimSpace(groupStatus)) {
+	case "forming":
+		return "Forming"
+	case "funding":
+		return "Funding"
+	case "bidding":
+		return "Bidding"
+	case "payout":
+		return "Jumping/Payout"
+	case "ended_period":
+		return "Period Ended"
+	case "voting_extension":
+		return "Voting Extension"
+	case "archived":
+		return "Completed/Archived"
+	default:
+		return "Active"
+	}
+}
+
+func deriveLifecyclePhase(poolStatus int, periodStatus int) string {
+	return lifecyclePhaseLabel(deriveGroupStatus(poolStatus, periodStatus, false, false))
+}
+
+func applyLifecycleMetadata(item *groupItem) {
+	if item == nil {
+		return
+	}
+
+	item.GroupStatus = deriveGroupStatus(
+		item.Status,
+		item.CurrentPeriodStatus,
+		item.CycleCompleted,
+		item.ExtendVoteOpen,
+	)
+	item.Phase = lifecyclePhaseLabel(item.GroupStatus)
 }
 
 func newPoolStateReader(rpcURL string) *poolStateReader {
@@ -950,13 +1011,24 @@ func newPoolStateReader(rpcURL string) *poolStateReader {
 	}
 
 	parsedABI, parseErr := abi.JSON(strings.NewReader(`[
-		{"type":"function","name":"poolStatus","stateMutability":"view","inputs":[],"outputs":[{"type":"uint8"}]},
-		{"type":"function","name":"currentCycle","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
-		{"type":"function","name":"currentPeriod","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
-		{"type":"function","name":"activeMemberCount","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
-		{"type":"function","name":"cycleCompleted","stateMutability":"view","inputs":[],"outputs":[{"type":"bool"}]},
-		{"type":"function","name":"periodInfo","stateMutability":"view","inputs":[{"type":"uint256"},{"type":"uint256"}],"outputs":[{"type":"uint8"},{"type":"uint64"},{"type":"uint64"},{"type":"uint64"},{"type":"address"},{"type":"address"},{"type":"uint256"},{"type":"uint256"},{"type":"uint256"},{"type":"bool"},{"type":"bytes32"}]}
-	]`))
+			{"type":"function","name":"poolStatus","stateMutability":"view","inputs":[],"outputs":[{"type":"uint8"}]},
+			{"type":"function","name":"currentCycle","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
+			{"type":"function","name":"currentPeriod","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
+			{"type":"function","name":"publicRecruitment","stateMutability":"view","inputs":[],"outputs":[{"type":"bool"}]},
+			{"type":"function","name":"activeMemberCount","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
+			{"type":"function","name":"activeMembers","stateMutability":"view","inputs":[],"outputs":[{"type":"address[]"}]},
+			{"type":"function","name":"members","stateMutability":"view","inputs":[],"outputs":[{"type":"address[]"}]},
+			{"type":"function","name":"allMembers","stateMutability":"view","inputs":[],"outputs":[{"type":"address[]"}]},
+			{"type":"function","name":"isMember","stateMutability":"view","inputs":[{"type":"address"}],"outputs":[{"type":"bool"}]},
+			{"type":"function","name":"isActiveMember","stateMutability":"view","inputs":[{"type":"address"}],"outputs":[{"type":"bool"}]},
+			{"type":"function","name":"hasContributed","stateMutability":"view","inputs":[{"type":"uint256"},{"type":"uint256"},{"type":"address"}],"outputs":[{"type":"bool"}]},
+			{"type":"function","name":"hasReceivedInCycle","stateMutability":"view","inputs":[{"type":"uint256"},{"type":"address"}],"outputs":[{"type":"bool"}]},
+			{"type":"function","name":"claimableYield","stateMutability":"view","inputs":[{"type":"address"}],"outputs":[{"type":"uint256"}]},
+			{"type":"function","name":"claimableArchiveRefund","stateMutability":"view","inputs":[{"type":"address"}],"outputs":[{"type":"uint256"}]},
+			{"type":"function","name":"cycleCompleted","stateMutability":"view","inputs":[],"outputs":[{"type":"bool"}]},
+			{"type":"function","name":"extendVoteState","stateMutability":"view","inputs":[],"outputs":[{"type":"bool"},{"type":"uint256"},{"type":"uint256"}]},
+			{"type":"function","name":"periodInfo","stateMutability":"view","inputs":[{"type":"uint256"},{"type":"uint256"}],"outputs":[{"type":"uint8"},{"type":"uint64"},{"type":"uint64"},{"type":"uint64"},{"type":"address"},{"type":"address"},{"type":"uint256"},{"type":"uint256"},{"type":"uint256"},{"type":"bool"},{"type":"bytes32"}]}
+		]`))
 	if parseErr != nil {
 		client.Close()
 		fmt.Fprintf(os.Stderr, "[groups] invalid pool ABI: %v\n", parseErr)
@@ -988,6 +1060,11 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 		return poolState{}, err
 	}
 
+	publicRecruitmentRaw, err := r.call(ctx, address, "publicRecruitment")
+	if err != nil {
+		return poolState{}, err
+	}
+
 	activeMemberCountRaw, err := r.call(ctx, address, "activeMemberCount")
 	if err != nil {
 		return poolState{}, err
@@ -1013,6 +1090,11 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 		return poolState{}, errors.New("invalid currentPeriod value")
 	}
 
+	publicRecruitmentValue, ok := publicRecruitmentRaw[0].(bool)
+	if !ok {
+		return poolState{}, errors.New("invalid publicRecruitment value")
+	}
+
 	activeMemberCountValue, ok := activeMemberCountRaw[0].(*big.Int)
 	if !ok {
 		return poolState{}, errors.New("invalid activeMemberCount value")
@@ -1021,6 +1103,19 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 	cycleCompletedValue, ok := cycleCompletedRaw[0].(bool)
 	if !ok {
 		return poolState{}, errors.New("invalid cycleCompleted value")
+	}
+
+	extendVoteOpenValue := false
+	extendVoteRoundValue := big.NewInt(0)
+	extendYesVotesValue := big.NewInt(0)
+	extendVoteStateRaw, extendVoteErr := r.call(ctx, address, "extendVoteState")
+	if extendVoteErr == nil {
+		open, round, yesVotes, parseErr := parseExtendVoteStateOutput(extendVoteStateRaw)
+		if parseErr == nil {
+			extendVoteOpenValue = open
+			extendVoteRoundValue = round
+			extendYesVotesValue = yesVotes
+		}
 	}
 
 	currentPeriodStatusValue := 0
@@ -1042,15 +1137,77 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 		}
 	}
 
+	activeMemberCount := int(activeMemberCountValue.Int64())
+	if reconciledMembers, reconcileErr := r.readActiveMembers(ctx, address, activeMemberCount); reconcileErr == nil && len(reconciledMembers) > 0 {
+		activeMemberCount = len(reconciledMembers)
+	}
+
+	groupStatus := deriveGroupStatus(
+		int(statusValue),
+		currentPeriodStatusValue,
+		cycleCompletedValue,
+		extendVoteOpenValue,
+	)
+
 	return poolState{
 		Status:              int(statusValue),
 		CurrentPeriodStatus: currentPeriodStatusValue,
-		Phase:               deriveLifecyclePhase(int(statusValue), currentPeriodStatusValue),
+		Phase:               lifecyclePhaseLabel(groupStatus),
+		GroupStatus:         groupStatus,
 		CurrentCycle:        currentCycleValue.String(),
 		CurrentPeriod:       currentPeriodValue.String(),
-		ActiveMemberCount:   int(activeMemberCountValue.Int64()),
+		PublicRecruitment:   publicRecruitmentValue,
+		ActiveMemberCount:   activeMemberCount,
 		CycleCompleted:      cycleCompletedValue,
+		ExtendVoteOpen:      extendVoteOpenValue,
+		ExtendVoteRound:     extendVoteRoundValue.String(),
+		ExtendYesVotes:      extendYesVotesValue.String(),
+		ExtendRequiredVotes: activeMemberCount,
 	}, nil
+}
+
+func parseExtendVoteStateOutput(raw []any) (bool, *big.Int, *big.Int, error) {
+	if len(raw) < 3 {
+		return false, nil, nil, errors.New("invalid extendVoteState output length")
+	}
+
+	open, ok := raw[0].(bool)
+	if !ok {
+		return false, nil, nil, errors.New("invalid extendVoteState open value")
+	}
+
+	round, roundOK := asBigInt(raw[1])
+	if !roundOK {
+		return false, nil, nil, errors.New("invalid extendVoteState round value")
+	}
+
+	yesVotes, yesOK := asBigInt(raw[2])
+	if !yesOK {
+		return false, nil, nil, errors.New("invalid extendVoteState yesVotes value")
+	}
+
+	return open, round, yesVotes, nil
+}
+
+func asBigInt(value any) (*big.Int, bool) {
+	switch typed := value.(type) {
+	case *big.Int:
+		return new(big.Int).Set(typed), true
+	case uint8:
+		return new(big.Int).SetUint64(uint64(typed)), true
+	case uint16:
+		return new(big.Int).SetUint64(uint64(typed)), true
+	case uint32:
+		return new(big.Int).SetUint64(uint64(typed)), true
+	case uint64:
+		return new(big.Int).SetUint64(typed), true
+	case int:
+		return big.NewInt(int64(typed)), true
+	case int64:
+		return big.NewInt(typed), true
+	default:
+		return nil, false
+	}
 }
 
 func (r *poolStateReader) call(ctx context.Context, poolAddress common.Address, method string, args ...any) ([]any, error) {
@@ -1075,4 +1232,94 @@ func (r *poolStateReader) call(ctx context.Context, poolAddress common.Address, 
 	}
 
 	return decoded, nil
+}
+
+func (r *poolStateReader) readAddressList(ctx context.Context, poolAddress common.Address, methods ...string) ([]common.Address, string, error) {
+	var lastErr error
+	for _, method := range methods {
+		name := strings.TrimSpace(method)
+		if name == "" {
+			continue
+		}
+
+		raw, err := r.call(ctx, poolAddress, name)
+		if err != nil {
+			lastErr = fmt.Errorf("read %s: %w", name, err)
+			continue
+		}
+		if len(raw) == 0 {
+			return []common.Address{}, name, nil
+		}
+
+		addresses, ok := raw[0].([]common.Address)
+		if ok {
+			return uniqueAddresses(addresses), name, nil
+		}
+
+		anyValues, ok := raw[0].([]any)
+		if !ok {
+			lastErr = fmt.Errorf("invalid %s output", name)
+			continue
+		}
+
+		parsed := make([]common.Address, 0, len(anyValues))
+		for _, value := range anyValues {
+			parsed = append(parsed, toAddress(value))
+		}
+		return uniqueAddresses(parsed), name, nil
+	}
+
+	if lastErr != nil {
+		return nil, "", lastErr
+	}
+	return []common.Address{}, "", nil
+}
+
+func (r *poolStateReader) filterActiveMembers(
+	ctx context.Context,
+	poolAddress common.Address,
+	members []common.Address,
+) ([]common.Address, error) {
+	filtered := make([]common.Address, 0, len(members))
+	for _, member := range members {
+		raw, err := r.call(ctx, poolAddress, "isActiveMember", member)
+		if err != nil {
+			return nil, fmt.Errorf("read isActiveMember: %w", err)
+		}
+		if len(raw) == 0 {
+			continue
+		}
+		if toBool(raw[0]) {
+			filtered = append(filtered, member)
+		}
+	}
+	return uniqueAddresses(filtered), nil
+}
+
+func (r *poolStateReader) readActiveMembers(
+	ctx context.Context,
+	poolAddress common.Address,
+	expectedCount int,
+) ([]common.Address, error) {
+	activeMembers, sourceMethod, err := r.readAddressList(ctx, poolAddress, "activeMembers", "members", "allMembers")
+	if err != nil {
+		return nil, err
+	}
+
+	if sourceMethod == "allMembers" {
+		if filtered, filterErr := r.filterActiveMembers(ctx, poolAddress, activeMembers); filterErr == nil && len(filtered) > 0 {
+			activeMembers = filtered
+		}
+	}
+
+	if expectedCount > 0 && len(activeMembers) < expectedCount {
+		allMembers, _, allErr := r.readAddressList(ctx, poolAddress, "allMembers")
+		if allErr == nil && len(allMembers) > 0 {
+			if filtered, filterErr := r.filterActiveMembers(ctx, poolAddress, allMembers); filterErr == nil && len(filtered) >= len(activeMembers) {
+				activeMembers = filtered
+			}
+		}
+	}
+
+	return uniqueAddresses(activeMembers), nil
 }

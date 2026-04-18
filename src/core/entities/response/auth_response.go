@@ -54,3 +54,10 @@ type ProfileResponse struct {
 	TCNR                          string `json:"tCNR"`
 	KYCStatus                     string `json:"kycStatus"`
 }
+
+// BasicProfileResponse is returned from profile lookup endpoints.
+type BasicProfileResponse struct {
+	Address   string `json:"address"`
+	Username  string `json:"username"`
+	AvatarURL string `json:"avatarUrl"`
+}
