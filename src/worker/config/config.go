@@ -14,6 +14,7 @@ import (
 type Config struct {
 	Port             string
 	InitiaAPIURL     string
+	ChainoraRPCURL   string
 	DBURL            string
 	ScanInterval     time.Duration
 	RequestTimeout   time.Duration
@@ -28,6 +29,10 @@ type yamlConfig struct {
 	Initia struct {
 		APIURL string `yaml:"api_url"`
 	} `yaml:"initia"`
+
+	Chainora struct {
+		RPCURL string `yaml:"rpc_url"`
+	} `yaml:"chainora"`
 
 	Scheduler struct {
 		ScanIntervalSeconds   int `yaml:"scan_interval_seconds"`
@@ -61,6 +66,7 @@ func Load() Config {
 	return Config{
 		Port:             fallback(strings.TrimSpace(raw.Server.Port), "8090"),
 		InitiaAPIURL:     strings.TrimRight(fallback(strings.TrimSpace(raw.Initia.APIURL), "https://api.testnet.initia.xyz"), "/"),
+		ChainoraRPCURL:   firstNonEmpty(os.Getenv("CHAINORA_RPC_URL"), strings.TrimSpace(raw.Chainora.RPCURL)),
 		DBURL:            firstNonEmpty(os.Getenv("DB_URL"), os.Getenv("DATABASE_URL"), strings.TrimSpace(raw.Database.URL)),
 		ScanInterval:     time.Duration(intervalSec) * time.Second,
 		RequestTimeout:   time.Duration(timeoutSec) * time.Second,

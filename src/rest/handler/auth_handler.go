@@ -259,12 +259,14 @@ func (h *AuthHandler) GetProfile(ctx *gin.Context) {
 }
 
 // ListProfiles godoc
-// @Summary List basic profiles by wallet addresses
-// @Description Returns profile fields (address, username, avatarUrl) for a batch of wallet addresses.
+// @Summary List basic profiles by wallet addresses or usernames
+// @Description Returns profile fields (address, username, avatarUrl) for a batch of wallet addresses/usernames.
 // @Tags auth
 // @Produce json
 // @Param addresses query string false "Comma-separated EVM addresses"
 // @Param address query []string false "Repeatable address query param"
+// @Param usernames query string false "Comma-separated usernames"
+// @Param username query []string false "Repeatable username query param"
 // @Success 200 {object} map[string]interface{}
 // @Failure 400 {object} map[string]interface{}
 // @Failure 401 {object} map[string]interface{}
@@ -282,12 +284,18 @@ func (h *AuthHandler) ListProfiles(ctx *gin.Context) {
 	}
 	rawAddresses = append(rawAddresses, ctx.QueryArray("address")...)
 
-	if len(rawAddresses) == 0 {
-		response.WriteError(ctx, fmt.Errorf("addresses query is required"))
+	rawUsernames := make([]string, 0, 1+len(ctx.QueryArray("username")))
+	if usernamesParam := strings.TrimSpace(ctx.Query("usernames")); usernamesParam != "" {
+		rawUsernames = append(rawUsernames, usernamesParam)
+	}
+	rawUsernames = append(rawUsernames, ctx.QueryArray("username")...)
+
+	if len(rawAddresses) == 0 && len(rawUsernames) == 0 {
+		response.WriteError(ctx, fmt.Errorf("addresses or usernames query is required"))
 		return
 	}
 
-	resp, triggerErr := h.listProfilesUC.Trigger(ctx, accessToken, rawAddresses)
+	resp, triggerErr := h.listProfilesUC.Trigger(ctx, accessToken, rawAddresses, rawUsernames)
 	if triggerErr != nil {
 		response.WriteError(ctx, triggerErr)
 		return

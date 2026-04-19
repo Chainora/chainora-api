@@ -258,7 +258,12 @@ func (u *getProfileUsecase) Trigger(ctx *gin.Context, req entityrequest.MeReques
 	}, nil
 }
 
-func (u *listProfilesUsecase) Trigger(ctx *gin.Context, accessToken string, addresses []string) ([]entityresponse.BasicProfileResponse, error) {
+func (u *listProfilesUsecase) Trigger(
+	ctx *gin.Context,
+	accessToken string,
+	addresses []string,
+	usernames []string,
+) ([]entityresponse.BasicProfileResponse, error) {
 	if strings.TrimSpace(accessToken) == "" {
 		return nil, fmt.Errorf("%w: missing bearer token", constants.ErrInvalidToken)
 	}
@@ -268,39 +273,85 @@ func (u *listProfilesUsecase) Trigger(ctx *gin.Context, accessToken string, addr
 	}
 
 	normalizedAddresses := normalizeAddressList(addresses)
-	if len(normalizedAddresses) == 0 {
-		return nil, fmt.Errorf("at least one valid address is required")
+	normalizedUsernames := normalizeUsernameList(usernames)
+	if len(normalizedAddresses) == 0 && len(normalizedUsernames) == 0 {
+		return nil, fmt.Errorf("at least one valid address or username is required")
 	}
 
-	if len(normalizedAddresses) > 120 {
-		return nil, fmt.Errorf("too many addresses: max 120")
+	if len(normalizedAddresses)+len(normalizedUsernames) > 120 {
+		return nil, fmt.Errorf("too many addresses/usernames: max 120")
 	}
 
-	profiles := make([]entityresponse.BasicProfileResponse, 0, len(normalizedAddresses))
+	profiles := make([]entityresponse.BasicProfileResponse, 0, len(normalizedAddresses)+len(normalizedUsernames))
+	seenAddresses := make(map[string]struct{}, len(normalizedAddresses)+len(normalizedUsernames))
+
 	for _, address := range normalizedAddresses {
-		profile := entityresponse.BasicProfileResponse{
-			Address:   address,
-			Username:  "",
-			AvatarURL: "",
-		}
-
-		user, err := u.auth.GetUserProfile(address)
-		if err == nil {
-			profile.Username = normalizeProfileUsername(user.Username)
-			profile.AvatarURL = strings.TrimSpace(user.AvatarURL)
-		} else if !errors.Is(err, constants.ErrUserNotFound) {
+		profile, err := u.buildProfile(ctx, address)
+		if err != nil {
 			return nil, err
 		}
 
-		resolvedUsername, resolveErr := u.resolveUsername(ctx.Request.Context(), address)
-		if resolveErr == nil && normalizeProfileUsername(resolvedUsername) != "" {
-			profile.Username = normalizeProfileUsername(resolvedUsername)
+		addressKey := strings.ToLower(strings.TrimSpace(profile.Address))
+		if addressKey == "" {
+			continue
+		}
+		seenAddresses[addressKey] = struct{}{}
+		profiles = append(profiles, profile)
+	}
+
+	for _, username := range normalizedUsernames {
+		user, err := u.auth.GetUserByUsername(username)
+		if err != nil {
+			if errors.Is(err, constants.ErrUserNotFound) {
+				continue
+			}
+			return nil, err
 		}
 
+		addressKey := strings.ToLower(strings.TrimSpace(user.Address))
+		if addressKey == "" {
+			continue
+		}
+		if _, exists := seenAddresses[addressKey]; exists {
+			continue
+		}
+
+		profile, profileErr := u.buildProfile(ctx, addressKey)
+		if profileErr != nil {
+			return nil, profileErr
+		}
+
+		seenAddresses[addressKey] = struct{}{}
 		profiles = append(profiles, profile)
 	}
 
 	return profiles, nil
+}
+
+func (u *listProfilesUsecase) buildProfile(
+	ctx *gin.Context,
+	address string,
+) (entityresponse.BasicProfileResponse, error) {
+	profile := entityresponse.BasicProfileResponse{
+		Address:   strings.ToLower(strings.TrimSpace(address)),
+		Username:  "",
+		AvatarURL: "",
+	}
+
+	user, err := u.auth.GetUserProfile(profile.Address)
+	if err == nil {
+		profile.Username = normalizeProfileUsername(user.Username)
+		profile.AvatarURL = strings.TrimSpace(user.AvatarURL)
+	} else if !errors.Is(err, constants.ErrUserNotFound) {
+		return entityresponse.BasicProfileResponse{}, err
+	}
+
+	resolvedUsername, resolveErr := u.resolveUsername(ctx.Request.Context(), profile.Address)
+	if resolveErr == nil && normalizeProfileUsername(resolvedUsername) != "" {
+		profile.Username = normalizeProfileUsername(resolvedUsername)
+	}
+
+	return profile, nil
 }
 
 func (u *updateProfileUsecase) Trigger(_ *gin.Context, accessToken string, req entityrequest.UpdateProfileRequest) (entityresponse.ProfileResponse, error) {
@@ -371,6 +422,37 @@ func normalizeAddressList(rawAddresses []string) []string {
 			}
 
 			if !isLikelyEVMAddress(normalized) {
+				continue
+			}
+
+			if _, exists := seen[normalized]; exists {
+				continue
+			}
+
+			seen[normalized] = struct{}{}
+			out = append(out, normalized)
+		}
+	}
+
+	return out
+}
+
+func normalizeUsernameList(rawUsernames []string) []string {
+	out := make([]string, 0, len(rawUsernames))
+	seen := make(map[string]struct{}, len(rawUsernames))
+
+	for _, chunk := range rawUsernames {
+		for _, candidate := range strings.Split(chunk, ",") {
+			normalized := strings.TrimSpace(candidate)
+			if strings.HasPrefix(normalized, "@") {
+				normalized = strings.TrimSpace(normalized[1:])
+			}
+			normalized = strings.ToLower(strings.TrimSpace(normalized))
+			if strings.HasSuffix(normalized, ".init") {
+				normalized = strings.TrimSuffix(normalized, ".init")
+			}
+			normalized = strings.TrimSpace(normalized)
+			if normalized == "" {
 				continue
 			}
 

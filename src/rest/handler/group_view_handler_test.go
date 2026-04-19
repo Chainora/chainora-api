@@ -45,13 +45,17 @@ func TestPhaseFromPeriodStatus(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		status    int
-		periodEnd int64
-		now       int64
-		want      string
+		name                 string
+		status               int
+		contributionDeadline int64
+		periodEnd            int64
+		now                  int64
+		allContributed       bool
+		want                 string
 	}{
-		{name: "collecting", status: 0, want: phaseFunding},
+		{name: "collecting", status: 0, contributionDeadline: 200, now: 100, want: phaseFunding},
+		{name: "collecting deadline passed and missing contributions", status: 0, contributionDeadline: 100, now: 120, want: phaseEnding},
+		{name: "collecting deadline passed and all contributions paid", status: 0, contributionDeadline: 100, now: 120, allContributed: true, want: phaseBidding},
 		{name: "auction", status: 1, want: phaseBidding},
 		{name: "payout before end", status: 2, periodEnd: 200, now: 100, want: phasePayout},
 		{name: "payout after end", status: 2, periodEnd: 200, now: 300, want: phaseEnding},
@@ -62,7 +66,10 @@ func TestPhaseFromPeriodStatus(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := phaseFromPeriodStatus(tt.status, tt.periodEnd, tt.now)
+			got := phaseFromPeriodStatus(tt.status, periodViewSnapshot{
+				ContributionDeadline: tt.contributionDeadline,
+				PeriodEndAt:          tt.periodEnd,
+			}, tt.now, tt.allContributed)
 			if got != tt.want {
 				t.Fatalf("phaseFromPeriodStatus() = %q, want %q", got, tt.want)
 			}
@@ -174,5 +181,27 @@ func TestBuildPhasePermissions(t *testing.T) {
 	})
 	if !permissions.CanClaimYield {
 		t.Fatalf("expected CanClaimYield=true in archived state with positive yield")
+	}
+
+	permissions = buildPhasePermissions(phasePermissionInput{
+		selectedPhase:        phaseFunding,
+		selectedPeriod:       1,
+		currentPeriod:        1,
+		isCurrentActivePhase: true,
+		viewerAddress:        "0x1111111111111111111111111111111111111111",
+		viewerIsMember:       true,
+		viewerIsActiveMember: true,
+		groupStatus:          "deadlinepassed",
+		periodInfo: periodViewSnapshot{
+			ContributionDeadline: 100,
+		},
+		nowUnix:        120,
+		claimableYield: big.NewInt(0),
+	})
+	if permissions.CanContribute {
+		t.Fatalf("expected CanContribute=false when contribution deadline has passed")
+	}
+	if permissions.DisabledReason == "" {
+		t.Fatalf("expected DisabledReason for deadlinepassed state")
 	}
 }

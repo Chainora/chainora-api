@@ -246,43 +246,6 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 		}
 	}
 
-	selectedPhase := phaseFromPeriodStatus(selectedPeriodInfo.Status, selectedPeriodInfo.PeriodEndAt, nowUnix)
-	if strings.TrimSpace(req.Phase) != "" {
-		if normalizedPhase, phaseErr := normalizeViewPhase(req.Phase); phaseErr == nil {
-			selectedPhase = normalizedPhase
-		}
-	}
-
-	activePhase := deriveCurrentActivePhase(item, currentPeriodInfo, nowUnix)
-	isHistoricalView, isFutureView, isCurrentActivePhase := compareSelection(
-		item,
-		selectedPeriod,
-		selectedPhase,
-		currentPeriod,
-		activePhase,
-	)
-
-	phaseStatus := "ended"
-	switch {
-	case isCurrentActivePhase:
-		phaseStatus = "active"
-	case isFutureView:
-		phaseStatus = "upcoming"
-	}
-
-	countdownSeconds := int64(0)
-	if phaseStatus == "active" {
-		phaseEnd := phaseEndAt(selectedPhase, selectedPeriodInfo)
-		if phaseEnd > nowUnix {
-			countdownSeconds = phaseEnd - nowUnix
-		}
-	} else if phaseStatus == "upcoming" {
-		phaseStart := phaseStartAt(selectedPhase, selectedPeriodInfo)
-		if phaseStart > nowUnix {
-			countdownSeconds = phaseStart - nowUnix
-		}
-	}
-
 	activeMembers, activeMembersErr := h.readAddressList(ctx, poolAddress, "activeMembers", "members", "allMembers")
 	if activeMembersErr != nil {
 		activeMembers = []common.Address{}
@@ -339,13 +302,80 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 		activeMembers = append(activeMembers, viewer)
 	}
 
+	currentHasContributed := map[string]bool{}
+	currentHasContributedLoaded := false
+	allActiveContributedCurrent := false
+	if item.Status == 1 && item.CurrentPeriodStatus == 0 && len(activeMembers) > 0 {
+		currentHasContributed, err = h.readHasContributedMap(
+			ctx,
+			poolAddress,
+			big.NewInt(int64(currentCycle)),
+			big.NewInt(int64(currentPeriod)),
+			activeMembers,
+		)
+		if err != nil {
+			return groupViewResponse{}, err
+		}
+		currentHasContributedLoaded = true
+		allActiveContributedCurrent = allActiveMembersContributed(activeMembers, currentHasContributed)
+	}
+
+	item.GroupStatus = deriveTemporalGroupStatus(item, currentPeriodInfo, nowUnix, allActiveContributedCurrent)
+	item.Phase = lifecyclePhaseLabel(item.GroupStatus)
+
+	selectedAllActiveContributed := false
+	if selectedCycle == currentCycle && selectedPeriod == currentPeriod {
+		selectedAllActiveContributed = allActiveContributedCurrent
+	}
+
+	selectedPhase := phaseFromPeriodStatus(selectedPeriodInfo.Status, selectedPeriodInfo, nowUnix, selectedAllActiveContributed)
+	if strings.TrimSpace(req.Phase) != "" {
+		if normalizedPhase, phaseErr := normalizeViewPhase(req.Phase); phaseErr == nil {
+			selectedPhase = normalizedPhase
+		}
+	}
+
+	activePhase := deriveCurrentActivePhase(item, currentPeriodInfo, nowUnix, allActiveContributedCurrent)
+	isHistoricalView, isFutureView, isCurrentActivePhase := compareSelection(
+		item,
+		selectedPeriod,
+		selectedPhase,
+		currentPeriod,
+		activePhase,
+	)
+
+	phaseStatus := "ended"
+	switch {
+	case isCurrentActivePhase:
+		phaseStatus = "active"
+	case isFutureView:
+		phaseStatus = "upcoming"
+	}
+
+	countdownSeconds := int64(0)
+	if phaseStatus == "active" {
+		phaseEnd := phaseEndAt(selectedPhase, selectedPeriodInfo)
+		if phaseEnd > nowUnix {
+			countdownSeconds = phaseEnd - nowUnix
+		}
+	} else if phaseStatus == "upcoming" {
+		phaseStart := phaseStartAt(selectedPhase, selectedPeriodInfo)
+		if phaseStart > nowUnix {
+			countdownSeconds = phaseStart - nowUnix
+		}
+	}
+
 	hasContributed := map[string]bool{}
 	hasReceived := map[string]bool{}
 	switch selectedPhase {
 	case phaseFunding:
-		hasContributed, err = h.readHasContributedMap(ctx, poolAddress, selectedCycleBig, selectedPeriodBig, activeMembers)
-		if err != nil {
-			return groupViewResponse{}, err
+		if currentHasContributedLoaded && selectedCycle == currentCycle && selectedPeriod == currentPeriod {
+			hasContributed = currentHasContributed
+		} else {
+			hasContributed, err = h.readHasContributedMap(ctx, poolAddress, selectedCycleBig, selectedPeriodBig, activeMembers)
+			if err != nil {
+				return groupViewResponse{}, err
+			}
 		}
 	case phaseBidding, phasePayout, phaseEnding:
 		hasReceived, err = h.readHasReceivedMap(ctx, poolAddress, selectedCycleBig, activeMembers)
@@ -754,19 +784,32 @@ func buildPhasePermissions(input phasePermissionInput) groupViewPermissions {
 
 	isArchived := strings.EqualFold(strings.TrimSpace(input.groupStatus), "archived")
 	isVotingExtension := strings.EqualFold(strings.TrimSpace(input.groupStatus), "voting_extension")
+	isDeadlinePassed := strings.EqualFold(strings.TrimSpace(input.groupStatus), "deadlinepassed")
 	viewerIsRecipient := strings.EqualFold(strings.TrimSpace(input.periodInfo.Recipient), strings.TrimSpace(input.viewerAddress))
 	canActInPhase := input.isCurrentActivePhase && !input.isHistoricalView && !input.isFutureView
 
-	if canActInPhase && input.viewerIsActiveMember && input.selectedPhase == phaseFunding && !input.hasContributedByViewer {
+	canContributeNow := input.periodInfo.ContributionDeadline <= 0 || input.nowUnix < input.periodInfo.ContributionDeadline
+	canBidNow := (input.periodInfo.ContributionDeadline <= 0 || input.nowUnix >= input.periodInfo.ContributionDeadline) &&
+		(input.periodInfo.AuctionDeadline <= 0 || input.nowUnix < input.periodInfo.AuctionDeadline)
+
+	if canActInPhase &&
+		input.viewerIsActiveMember &&
+		input.selectedPhase == phaseFunding &&
+		!input.hasContributedByViewer &&
+		canContributeNow &&
+		!isDeadlinePassed {
 		permissions.CanContribute = true
 	}
-	if canActInPhase && input.viewerIsActiveMember && input.selectedPhase == phaseBidding && !input.hasReceivedByViewer {
+	if canActInPhase &&
+		input.viewerIsActiveMember &&
+		input.selectedPhase == phaseBidding &&
+		!input.hasReceivedByViewer &&
+		canBidNow {
 		permissions.CanBid = true
 	}
 	if canActInPhase &&
 		input.viewerIsActiveMember &&
 		input.selectedPhase == phaseBidding &&
-		input.periodInfo.Status == 1 &&
 		input.periodInfo.AuctionDeadline > 0 &&
 		input.nowUnix >= input.periodInfo.AuctionDeadline {
 		permissions.CanCloseAuction = true
@@ -788,11 +831,21 @@ func buildPhasePermissions(input phasePermissionInput) groupViewPermissions {
 		switch input.selectedPhase {
 		case phaseFunding:
 			if !permissions.CanContribute {
-				permissions.DisabledReason = "Contribution already submitted or phase is not active."
+				if isDeadlinePassed || (input.periodInfo.ContributionDeadline > 0 && input.nowUnix >= input.periodInfo.ContributionDeadline) {
+					permissions.DisabledReason = "Contribution deadline has passed for this period."
+				} else {
+					permissions.DisabledReason = "Contribution already submitted or phase is not active."
+				}
 			}
 		case phaseBidding:
 			if !permissions.CanBid && !permissions.CanCloseAuction {
-				permissions.DisabledReason = "Bidding is unavailable for your wallet in this phase."
+				if input.periodInfo.ContributionDeadline > 0 && input.nowUnix < input.periodInfo.ContributionDeadline {
+					permissions.DisabledReason = "Bidding opens after contribution deadline."
+				} else if input.periodInfo.AuctionDeadline > 0 && input.nowUnix >= input.periodInfo.AuctionDeadline {
+					permissions.DisabledReason = "Auction deadline reached. Close auction to continue."
+				} else {
+					permissions.DisabledReason = "Bidding is unavailable for your wallet in this phase."
+				}
 			} else if permissions.CanBid && !permissions.CanCloseAuction {
 				permissions.DisabledReason = "Close auction is available after auction deadline."
 			}
@@ -801,7 +854,9 @@ func buildPhasePermissions(input phasePermissionInput) groupViewPermissions {
 				permissions.DisabledReason = "Only the selected recipient can claim payout while payout is open."
 			}
 		case phaseEnding:
-			if isVotingExtension {
+			if isDeadlinePassed {
+				permissions.DisabledReason = "Contribution deadline passed before all active members contributed."
+			} else if isVotingExtension {
 				if !permissions.CanVoteExtend {
 					permissions.DisabledReason = "Extension voting is unavailable for this selection."
 				}
@@ -812,6 +867,33 @@ func buildPhasePermissions(input phasePermissionInput) groupViewPermissions {
 	}
 
 	return permissions
+}
+
+func allActiveMembersContributed(activeMembers []common.Address, contributed map[string]bool) bool {
+	if len(activeMembers) == 0 {
+		return false
+	}
+
+	for _, member := range activeMembers {
+		if !contributed[strings.ToLower(member.Hex())] {
+			return false
+		}
+	}
+	return true
+}
+
+func deriveTemporalGroupStatus(item groupItem, currentPeriod periodViewSnapshot, nowUnix int64, allActiveContributed bool) string {
+	base := deriveGroupStatus(item.Status, item.CurrentPeriodStatus, item.CycleCompleted, item.ExtendVoteOpen)
+	if item.Status != 1 || item.CycleCompleted || item.ExtendVoteOpen || item.CurrentPeriodStatus != 0 {
+		return base
+	}
+	if currentPeriod.ContributionDeadline <= 0 || nowUnix < currentPeriod.ContributionDeadline {
+		return base
+	}
+	if allActiveContributed {
+		return "bidding"
+	}
+	return "deadlinepassed"
 }
 
 func compareSelection(item groupItem, selectedPeriod int, selectedPhase string, currentPeriod int, activePhase string) (bool, bool, bool) {
@@ -845,7 +927,7 @@ func compareSelection(item groupItem, selectedPeriod int, selectedPhase string, 
 	return false, false, true
 }
 
-func deriveCurrentActivePhase(item groupItem, currentPeriod periodViewSnapshot, nowUnix int64) string {
+func deriveCurrentActivePhase(item groupItem, currentPeriod periodViewSnapshot, nowUnix int64, allActiveContributed bool) string {
 	if item.Status == 0 {
 		return phaseFunding
 	}
@@ -858,6 +940,12 @@ func deriveCurrentActivePhase(item groupItem, currentPeriod periodViewSnapshot, 
 
 	switch item.CurrentPeriodStatus {
 	case 0:
+		if currentPeriod.ContributionDeadline > 0 && nowUnix >= currentPeriod.ContributionDeadline {
+			if allActiveContributed {
+				return phaseBidding
+			}
+			return phaseEnding
+		}
 		return phaseFunding
 	case 1:
 		return phaseBidding
@@ -873,14 +961,20 @@ func deriveCurrentActivePhase(item groupItem, currentPeriod periodViewSnapshot, 
 	}
 }
 
-func phaseFromPeriodStatus(periodStatus int, periodEndAt int64, nowUnix int64) string {
+func phaseFromPeriodStatus(periodStatus int, period periodViewSnapshot, nowUnix int64, allActiveContributed bool) string {
 	switch periodStatus {
 	case 0:
+		if period.ContributionDeadline > 0 && nowUnix >= period.ContributionDeadline {
+			if allActiveContributed {
+				return phaseBidding
+			}
+			return phaseEnding
+		}
 		return phaseFunding
 	case 1:
 		return phaseBidding
 	case 2:
-		if periodEndAt > 0 && nowUnix >= periodEndAt {
+		if period.PeriodEndAt > 0 && nowUnix >= period.PeriodEndAt {
 			return phaseEnding
 		}
 		return phasePayout

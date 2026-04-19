@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -70,9 +69,26 @@ func Build(cfg config.Config) *App {
 	scanner := scanners.NewUsernameScanner(cfg.InitiaAPIURL, cfg.RequestTimeout)
 	usernameJob := jobs.NewUsernameSyncJob(scanner, cfg.UsernameSyncList, addressSource)
 
-	rpcURL := strings.TrimSpace(os.Getenv("CHAINORA_RPC_URL"))
+	rpcURL := strings.TrimSpace(cfg.ChainoraRPCURL)
+	if db == nil {
+		log.Printf("[worker] group invite notifications disabled: database is unavailable (set DB_URL or DATABASE_URL)")
+	} else if rpcURL == "" {
+		log.Printf("[worker] group invite notifications disabled: CHAINORA_RPC_URL is empty")
+	}
 	inviteNotificationJob := jobs.NewGroupInviteNotificationJob(db, rpcURL)
-	fundingReminderJob := jobs.NewFundingReminderNotificationJob(db)
+	if inviteNotificationJob != nil {
+		log.Printf("[worker] group invite notifications enabled")
+	}
+	fundingReminderJob := jobs.NewFundingReminderNotificationJob(db, rpcURL)
+	if fundingReminderJob == nil {
+		if db == nil {
+			log.Printf("[worker] funding reminder notifications disabled: database is unavailable (set DB_URL or DATABASE_URL)")
+		} else {
+			log.Printf("[worker] funding reminder notifications disabled: CHAINORA_RPC_URL is empty or unavailable")
+		}
+	} else {
+		log.Printf("[worker] funding reminder notifications enabled")
+	}
 
 	scheduler := orchestrators.NewScheduler(cfg.ScanInterval, usernameJob, inviteNotificationJob, fundingReminderJob)
 

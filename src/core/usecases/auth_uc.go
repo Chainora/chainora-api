@@ -19,6 +19,7 @@ type AuthRepository interface {
 	SaveSession(session entities.AuthSession) error
 	GetSession(sessionID string) (entities.AuthSession, error)
 	GetUser(address string) (entities.User, error)
+	GetUserByUsername(username string) (entities.User, error)
 	UsernameExists(username string) (bool, error)
 	UpsertUser(user entities.User) error
 	UpdateUser(user entities.User) error
@@ -43,6 +44,7 @@ type AuthUsecase interface {
 	ValidateLoginSession(sessionID string) error
 	AuthenticateUser(sessionID, address, signatureHex, username string, recoveryV *int) (entities.User, error)
 	GetUserProfile(address string) (entities.User, error)
+	GetUserByUsername(username string) (entities.User, error)
 	UpdateUserAvatar(address, avatarURL string) (entities.User, error)
 }
 
@@ -171,6 +173,42 @@ func (u *authUsecase) GetUserProfile(address string) (entities.User, error) {
 
 	if !errors.Is(err, constants.ErrUserNotFound) {
 		return entities.User{}, fmt.Errorf("get user: %w", err)
+	}
+
+	return entities.User{}, constants.ErrUserNotFound
+}
+
+func normalizeUsernameLookup(username string) string {
+	trimmed := strings.TrimSpace(username)
+	if trimmed == "" {
+		return ""
+	}
+
+	if strings.HasPrefix(trimmed, "@") {
+		trimmed = strings.TrimSpace(trimmed[1:])
+	}
+
+	lower := strings.ToLower(trimmed)
+	if strings.HasSuffix(lower, ".init") {
+		lower = strings.TrimSuffix(lower, ".init")
+	}
+
+	return strings.TrimSpace(lower)
+}
+
+func (u *authUsecase) GetUserByUsername(username string) (entities.User, error) {
+	normalizedUsername := normalizeUsernameLookup(username)
+	if normalizedUsername == "" {
+		return entities.User{}, constants.ErrUserNotFound
+	}
+
+	user, err := u.repo.GetUserByUsername(normalizedUsername)
+	if err == nil {
+		return user, nil
+	}
+
+	if !errors.Is(err, constants.ErrUserNotFound) {
+		return entities.User{}, fmt.Errorf("get user by username: %w", err)
 	}
 
 	return entities.User{}, constants.ErrUserNotFound

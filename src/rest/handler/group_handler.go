@@ -50,7 +50,7 @@ type createGroupRequest struct {
 	GroupImageURL      string `json:"groupImageUrl" validate:"omitempty,url,max=2048"`
 	PublicRecruitment  *bool  `json:"publicRecruitment"`
 	ContributionAmount string `json:"contributionAmount" validate:"required"`
-	TargetMembers      int    `json:"targetMembers" validate:"required,min=2,max=255"`
+	TargetMembers      int    `json:"targetMembers" validate:"required,min=3,max=255"`
 	PeriodDuration     int    `json:"periodDuration" validate:"required,min=1"`
 	ContributionWindow int    `json:"contributionWindow" validate:"required,min=1"`
 	AuctionWindow      int    `json:"auctionWindow" validate:"required,min=1"`
@@ -798,7 +798,8 @@ func (h *GroupHandler) refreshStaleGroupStates(ctx context.Context, items []grou
 	now := time.Now().UTC()
 	updated := make([]groupItem, 0, len(items))
 	for _, item := range items {
-		if !isStale(item.LastSyncedAt, now) {
+		forceTemporalRefresh := item.Status == 1 && item.CurrentPeriodStatus == 0
+		if !forceTemporalRefresh && !isStale(item.LastSyncedAt, now) {
 			updated = append(updated, item)
 			continue
 		}
@@ -959,6 +960,28 @@ func deriveGroupStatus(poolStatus int, periodStatus int, cycleCompleted bool, ex
 	}
 }
 
+func deriveTemporalGroupStatusFromSnapshot(
+	poolStatus int,
+	periodStatus int,
+	cycleCompleted bool,
+	extendVoteOpen bool,
+	contributionDeadline int64,
+	nowUnix int64,
+	allActiveContributed bool,
+) string {
+	base := deriveGroupStatus(poolStatus, periodStatus, cycleCompleted, extendVoteOpen)
+	if poolStatus != 1 || cycleCompleted || extendVoteOpen || periodStatus != 0 {
+		return base
+	}
+	if contributionDeadline <= 0 || nowUnix < contributionDeadline {
+		return base
+	}
+	if allActiveContributed {
+		return "bidding"
+	}
+	return "deadlinepassed"
+}
+
 func lifecyclePhaseLabel(groupStatus string) string {
 	switch strings.ToLower(strings.TrimSpace(groupStatus)) {
 	case "forming":
@@ -969,6 +992,8 @@ func lifecyclePhaseLabel(groupStatus string) string {
 		return "Bidding"
 	case "payout":
 		return "Jumping/Payout"
+	case "deadlinepassed":
+		return "Deadline Passed"
 	case "ended_period":
 		return "Period Ended"
 	case "voting_extension":
@@ -1119,6 +1144,8 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 	}
 
 	currentPeriodStatusValue := 0
+	currentContributionDeadline := int64(0)
+	nowUnix := time.Now().UTC().Unix()
 	if statusValue == 1 && currentCycleValue.Sign() > 0 && currentPeriodValue.Sign() > 0 {
 		periodInfoRaw, periodErr := r.call(
 			ctx,
@@ -1134,19 +1161,44 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 			case *big.Int:
 				currentPeriodStatusValue = int(value.Int64())
 			}
+			if len(periodInfoRaw) > 2 {
+				currentContributionDeadline = int64(toUint64(periodInfoRaw[2]))
+			}
 		}
 	}
 
+	activeMembersSnapshot := []common.Address{}
 	activeMemberCount := int(activeMemberCountValue.Int64())
 	if reconciledMembers, reconcileErr := r.readActiveMembers(ctx, address, activeMemberCount); reconcileErr == nil && len(reconciledMembers) > 0 {
 		activeMemberCount = len(reconciledMembers)
+		activeMembersSnapshot = reconciledMembers
 	}
 
-	groupStatus := deriveGroupStatus(
+	allActiveContributed := false
+	if statusValue == 1 &&
+		currentPeriodStatusValue == 0 &&
+		currentContributionDeadline > 0 &&
+		nowUnix >= currentContributionDeadline &&
+		len(activeMembersSnapshot) > 0 {
+		if contributedAll, contributedErr := r.allActiveMembersContributed(
+			ctx,
+			address,
+			currentCycleValue,
+			currentPeriodValue,
+			activeMembersSnapshot,
+		); contributedErr == nil {
+			allActiveContributed = contributedAll
+		}
+	}
+
+	groupStatus := deriveTemporalGroupStatusFromSnapshot(
 		int(statusValue),
 		currentPeriodStatusValue,
 		cycleCompletedValue,
 		extendVoteOpenValue,
+		currentContributionDeadline,
+		nowUnix,
+		allActiveContributed,
 	)
 
 	return poolState{
@@ -1322,4 +1374,37 @@ func (r *poolStateReader) readActiveMembers(
 	}
 
 	return uniqueAddresses(activeMembers), nil
+}
+
+func (r *poolStateReader) allActiveMembersContributed(
+	ctx context.Context,
+	poolAddress common.Address,
+	cycleID *big.Int,
+	periodID *big.Int,
+	activeMembers []common.Address,
+) (bool, error) {
+	if len(activeMembers) == 0 {
+		return false, nil
+	}
+
+	safeCycle := big.NewInt(0)
+	if cycleID != nil {
+		safeCycle = new(big.Int).Set(cycleID)
+	}
+	safePeriod := big.NewInt(0)
+	if periodID != nil {
+		safePeriod = new(big.Int).Set(periodID)
+	}
+
+	for _, member := range activeMembers {
+		raw, err := r.call(ctx, poolAddress, "hasContributed", safeCycle, safePeriod, member)
+		if err != nil {
+			return false, fmt.Errorf("read hasContributed: %w", err)
+		}
+		if len(raw) == 0 || !toBool(raw[0]) {
+			return false, nil
+		}
+	}
+
+	return true, nil
 }

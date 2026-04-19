@@ -51,6 +51,10 @@ type notificationReadAllResult struct {
 	UpdatedCount int `json:"updatedCount"`
 }
 
+type notificationClearAllResult struct {
+	DeletedCount int `json:"deletedCount"`
+}
+
 type notificationCursor struct {
 	CreatedAt time.Time
 	ID        string
@@ -326,6 +330,40 @@ func (h *NotificationHandler) MarkReadAll(ctx *gin.Context) {
 	}
 
 	response.Write(ctx.Writer, response.Ok(notificationReadAllResult{UpdatedCount: updatedCount}))
+}
+
+func (h *NotificationHandler) ClearAll(ctx *gin.Context) {
+	if h.db == nil {
+		response.WriteError(ctx, fmt.Errorf("notifications storage unavailable: %w", constants.ErrForbidden))
+		return
+	}
+
+	address, err := h.authenticatedAddress(ctx)
+	if err != nil {
+		response.WriteError(ctx, err)
+		return
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx.Request.Context(), notificationQueryTimeout)
+	defer cancel()
+
+	var deletedCount int
+	deleteErr := h.db.QueryRowContext(
+		queryCtx,
+		`WITH deleted AS (
+			DELETE FROM notifications
+			WHERE user_address = $1
+			RETURNING 1
+		)
+		SELECT COUNT(1) FROM deleted`,
+		strings.ToLower(strings.TrimSpace(address)),
+	).Scan(&deletedCount)
+	if deleteErr != nil {
+		response.WriteError(ctx, fmt.Errorf("clear notifications: %w", deleteErr))
+		return
+	}
+
+	response.Write(ctx.Writer, response.Ok(notificationClearAllResult{DeletedCount: deletedCount}))
 }
 
 func (h *NotificationHandler) authenticatedAddress(ctx *gin.Context) (string, error) {

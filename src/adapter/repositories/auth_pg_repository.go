@@ -111,6 +111,33 @@ func (r *PostgresAuthRepository) GetUser(address string) (entities.User, error) 
 	return user, nil
 }
 
+func (r *PostgresAuthRepository) GetUserByUsername(username string) (entities.User, error) {
+	key := strings.ToLower(strings.TrimSpace(username))
+	key = strings.TrimPrefix(key, "@")
+	key = strings.TrimSpace(strings.TrimSuffix(key, ".init"))
+	if key == "" {
+		return entities.User{}, fmt.Errorf("get user by username: %w", constants.ErrUserNotFound)
+	}
+
+	var user entities.User
+	if err := r.db.QueryRow(
+		`SELECT address, username, COALESCE(avatar_url, ''), COALESCE(username_count, 0), tcnr::text, kyc_status, public_key, COALESCE(last_login_at, last_login, NOW()),
+		        COALESCE(gas_sponsored, false), COALESCE(is_hardware_verified, false), COALESCE(primary_selection_sponsored_used, false)
+		 FROM users
+		 WHERE LOWER(TRIM(username)) = $1
+		 ORDER BY updated_at DESC
+		 LIMIT 1`,
+		key,
+	).Scan(&user.Address, &user.Username, &user.AvatarURL, &user.UsernameCount, &user.TCNR, &user.KYCStatus, &user.PublicKey, &user.LastLogin, &user.GasSponsored, &user.IsHardwareVerified, &user.PrimarySelectionSponsoredUsed); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return entities.User{}, fmt.Errorf("get user by username: %w", constants.ErrUserNotFound)
+		}
+		return entities.User{}, fmt.Errorf("get user by username: %w", err)
+	}
+
+	return user, nil
+}
+
 func (r *PostgresAuthRepository) UsernameExists(username string) (bool, error) {
 	trimmed := strings.TrimSpace(username)
 	if trimmed == "" {

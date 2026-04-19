@@ -69,6 +69,12 @@ func (d *fakeGroupDBDriver) creatorArg() string {
 	return value
 }
 
+func (d *fakeGroupDBDriver) hasInsert() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.lastArgs) > 0
+}
+
 type fakeGroupDBConn struct {
 	driver *fakeGroupDBDriver
 }
@@ -276,5 +282,38 @@ func TestCreateGroupCanonicalizesCreatorAddressFromToken(t *testing.T) {
 				t.Fatalf("expected response creatorAddress %s, got %s", expectedLower, payload.Data.CreatorAddress)
 			}
 		})
+	}
+}
+
+func TestCreateGroupRejectsTargetMembersBelowThree(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	handler, dbDriver := newTestGroupHandler(t, fakeTokenIssuer{address: testEVMAddress})
+	ctx, recorder := newJSONContext(http.MethodPost, "/v1/groups", `{
+		"poolId": "1",
+		"poolAddress": "0x0000000000000000000000000000000000000001",
+		"name": "Test Group",
+		"description": "group from test",
+		"groupImageUrl": "",
+		"publicRecruitment": true,
+		"contributionAmount": "1000000000000000000",
+		"targetMembers": 2,
+		"periodDuration": 86400,
+		"contributionWindow": 3600,
+		"auctionWindow": 1800,
+		"txHash": "0xabc"
+	}`)
+	ctx.Request.Header.Set("Authorization", "Bearer test-token")
+
+	handler.CreateGroup(ctx)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected status 400, got %d with body %s", recorder.Code, recorder.Body.String())
+	}
+	if dbDriver.hasInsert() {
+		t.Fatalf("expected create group to fail before insert")
+	}
+	if !strings.Contains(strings.ToLower(recorder.Body.String()), "targetmembers") {
+		t.Fatalf("expected targetMembers validation error, got %s", recorder.Body.String())
 	}
 }

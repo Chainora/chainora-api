@@ -4,6 +4,11 @@ server:
 initia:
   api_url: "https://api.testnet.initia.xyz"
 
+chainora:
+  # Used by invite/funding notification jobs to scan pool contract logs.
+  # Can be overridden by CHAINORA_RPC_URL environment variable.
+  rpc_url: ""
+
 scheduler:
   scan_interval_seconds: 60
   request_timeout_seconds: 6

@@ -20,12 +20,13 @@ import (
 const testNotificationID = "11111111-1111-4111-8111-111111111111"
 
 type fakeNotificationDBDriver struct {
-	mu           sync.Mutex
-	listRows     [][]driver.Value
-	unreadCount  int64
-	markReadRow  []driver.Value
-	markAllCount int64
-	lastArgsByOp map[string][]driver.NamedValue
+	mu            sync.Mutex
+	listRows      [][]driver.Value
+	unreadCount   int64
+	markReadRow   []driver.Value
+	markAllCount  int64
+	clearAllCount int64
+	lastArgsByOp  map[string][]driver.NamedValue
 }
 
 func (d *fakeNotificationDBDriver) Open(_ string) (driver.Conn, error) {
@@ -103,6 +104,11 @@ func (c *fakeNotificationDBConn) QueryContext(_ context.Context, query string, a
 		c.driver.setArgs("read_all", args)
 		return &fakeNotificationRows{
 			values: [][]driver.Value{{c.driver.markAllCount}},
+		}, nil
+	case strings.Contains(normalized, "with deleted as"):
+		c.driver.setArgs("clear_all", args)
+		return &fakeNotificationRows{
+			values: [][]driver.Value{{c.driver.clearAllCount}},
 		}, nil
 	case strings.Contains(normalized, "select count(1)") && strings.Contains(normalized, "from notifications"):
 		c.driver.setArgs("count", args)
@@ -190,7 +196,7 @@ func TestListNotificationsCanonicalizesUserAddress(t *testing.T) {
 			strings.ToLower(testEVMAddress),
 			"GROUP_INVITE",
 			"Group invite",
-			"Bạn được mời vào group Alpha",
+			"You were invited to join Alpha",
 			"11",
 			"/group/11",
 			false,
@@ -240,7 +246,7 @@ func TestUnreadCountAndMarkRead(t *testing.T) {
 		strings.ToLower(testEVMAddress),
 		"FUNDING_REMINDER",
 		"Funding reminder",
-		"Đã đến giờ nạp tiền cho group Alpha",
+		"It is time to contribute to Alpha.",
 		"99",
 		"/group/99?tab=deposit",
 		true,
@@ -326,6 +332,39 @@ func TestMarkReadAll(t *testing.T) {
 	expectedAddress := strings.ToLower(testEVMAddress)
 	if got := dbDriver.argAsString("read_all", 0); got != expectedAddress {
 		t.Fatalf("expected read-all canonical address %s, got %s", expectedAddress, got)
+	}
+}
+
+func TestClearAll(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler, dbDriver := newTestNotificationHandler(t, fakeTokenIssuer{address: testInitAddress})
+	dbDriver.clearAllCount = 7
+
+	clearCtx, clearRecorder := newJSONContext(http.MethodDelete, "/v1/notifications", "")
+	clearCtx.Request.Header.Set("Authorization", "Bearer test-token")
+
+	handler.ClearAll(clearCtx)
+
+	if clearRecorder.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d body=%s", clearRecorder.Code, clearRecorder.Body.String())
+	}
+
+	envelope := decodeNotificationEnvelope(t, clearRecorder.Body.String())
+	if !envelope.Success {
+		t.Fatalf("expected success response, got error %s", envelope.Error)
+	}
+
+	var payload notificationClearAllResult
+	if err := json.Unmarshal(envelope.Data, &payload); err != nil {
+		t.Fatalf("decode clear-all payload: %v", err)
+	}
+	if payload.DeletedCount != 7 {
+		t.Fatalf("expected deleted count 7, got %d", payload.DeletedCount)
+	}
+
+	expectedAddress := strings.ToLower(testEVMAddress)
+	if got := dbDriver.argAsString("clear_all", 0); got != expectedAddress {
+		t.Fatalf("expected clear-all canonical address %s, got %s", expectedAddress, got)
 	}
 }
 

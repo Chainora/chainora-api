@@ -4,6 +4,9 @@ server:
 initia:
   api_url: "https://api.testnet.initia.xyz"
 
+chainora:
+  rpc_url: "http://157.66.100.120:8545/"
+
 scheduler:
   scan_interval_seconds: 60
   request_timeout_seconds: 6

@@ -63,6 +63,40 @@ func (r *InMemoryAuthRepository) GetUser(address string) (entities.User, error) 
 	return model.ToEntity(), nil
 }
 
+func (r *InMemoryAuthRepository) GetUserByUsername(username string) (entities.User, error) {
+	normalized := strings.ToLower(strings.TrimSpace(username))
+	normalized = strings.TrimPrefix(normalized, "@")
+	normalized = strings.TrimSpace(strings.TrimSuffix(normalized, ".init"))
+	if normalized == "" {
+		return entities.User{}, fmt.Errorf("get user by username: %w", constants.ErrUserNotFound)
+	}
+
+	var matched entities.User
+	found := false
+	r.users.Range(func(_, value any) bool {
+		model, ok := value.(models.UserModel)
+		if !ok {
+			return true
+		}
+
+		candidateUsername := strings.ToLower(strings.TrimSpace(model.Username))
+		candidateUsername = strings.TrimSpace(strings.TrimSuffix(candidateUsername, ".init"))
+		if candidateUsername != normalized {
+			return true
+		}
+
+		matched = model.ToEntity()
+		found = true
+		return false
+	})
+
+	if !found {
+		return entities.User{}, fmt.Errorf("get user by username: %w", constants.ErrUserNotFound)
+	}
+
+	return matched, nil
+}
+
 func (r *InMemoryAuthRepository) UsernameExists(username string) (bool, error) {
 	trimmed := strings.TrimSpace(username)
 	if trimmed == "" {
