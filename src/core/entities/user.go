@@ -7,6 +7,7 @@ type User struct {
 	Address                       string
 	Username                      string
 	AvatarURL                     string
+	ReputationScore               int64
 	UsernameCount                 int
 	PrimarySelectionSponsoredUsed bool
 	TCNR                          string

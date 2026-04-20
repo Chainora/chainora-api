@@ -96,12 +96,12 @@ func (r *PostgresAuthRepository) GetUser(address string) (entities.User, error) 
 
 	var user entities.User
 	if err := r.db.QueryRow(
-		`SELECT address, username, COALESCE(avatar_url, ''), COALESCE(username_count, 0), tcnr::text, kyc_status, public_key, COALESCE(last_login_at, last_login, NOW()),
+		`SELECT address, username, COALESCE(avatar_url, ''), COALESCE(reputation_score, 0), COALESCE(username_count, 0), tcnr::text, kyc_status, public_key, COALESCE(last_login_at, last_login, NOW()),
 		        COALESCE(gas_sponsored, false), COALESCE(is_hardware_verified, false), COALESCE(primary_selection_sponsored_used, false)
 		 FROM users
 		 WHERE address = $1`,
 		key,
-	).Scan(&user.Address, &user.Username, &user.AvatarURL, &user.UsernameCount, &user.TCNR, &user.KYCStatus, &user.PublicKey, &user.LastLogin, &user.GasSponsored, &user.IsHardwareVerified, &user.PrimarySelectionSponsoredUsed); err != nil {
+	).Scan(&user.Address, &user.Username, &user.AvatarURL, &user.ReputationScore, &user.UsernameCount, &user.TCNR, &user.KYCStatus, &user.PublicKey, &user.LastLogin, &user.GasSponsored, &user.IsHardwareVerified, &user.PrimarySelectionSponsoredUsed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return entities.User{}, fmt.Errorf("get user: %w", constants.ErrUserNotFound)
 		}
@@ -121,14 +121,14 @@ func (r *PostgresAuthRepository) GetUserByUsername(username string) (entities.Us
 
 	var user entities.User
 	if err := r.db.QueryRow(
-		`SELECT address, username, COALESCE(avatar_url, ''), COALESCE(username_count, 0), tcnr::text, kyc_status, public_key, COALESCE(last_login_at, last_login, NOW()),
+		`SELECT address, username, COALESCE(avatar_url, ''), COALESCE(reputation_score, 0), COALESCE(username_count, 0), tcnr::text, kyc_status, public_key, COALESCE(last_login_at, last_login, NOW()),
 		        COALESCE(gas_sponsored, false), COALESCE(is_hardware_verified, false), COALESCE(primary_selection_sponsored_used, false)
 		 FROM users
 		 WHERE LOWER(TRIM(username)) = $1
 		 ORDER BY updated_at DESC
 		 LIMIT 1`,
 		key,
-	).Scan(&user.Address, &user.Username, &user.AvatarURL, &user.UsernameCount, &user.TCNR, &user.KYCStatus, &user.PublicKey, &user.LastLogin, &user.GasSponsored, &user.IsHardwareVerified, &user.PrimarySelectionSponsoredUsed); err != nil {
+	).Scan(&user.Address, &user.Username, &user.AvatarURL, &user.ReputationScore, &user.UsernameCount, &user.TCNR, &user.KYCStatus, &user.PublicKey, &user.LastLogin, &user.GasSponsored, &user.IsHardwareVerified, &user.PrimarySelectionSponsoredUsed); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return entities.User{}, fmt.Errorf("get user by username: %w", constants.ErrUserNotFound)
 		}
@@ -177,6 +177,9 @@ func (r *PostgresAuthRepository) UpsertUser(user entities.User) error {
 		if strings.TrimSpace(user.PublicKey) == "" {
 			user.PublicKey = existing.PublicKey
 		}
+		if user.ReputationScore == 0 && existing.ReputationScore != 0 {
+			user.ReputationScore = existing.ReputationScore
+		}
 	} else if !errors.Is(err, constants.ErrUserNotFound) {
 		return fmt.Errorf("upsert user: %w", err)
 	}
@@ -196,12 +199,13 @@ func (r *PostgresAuthRepository) UpsertUser(user entities.User) error {
 	}
 
 	_, err := r.db.Exec(
-		`INSERT INTO users (address, username, avatar_url, username_count, tcnr, kyc_status, public_key, last_login, last_login_at, gas_sponsored, is_hardware_verified, primary_selection_sponsored_used, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5::numeric, $6, $7, $8, $8, $9, $10, $11, NOW(), NOW())
+		`INSERT INTO users (address, username, avatar_url, reputation_score, username_count, tcnr, kyc_status, public_key, last_login, last_login_at, gas_sponsored, is_hardware_verified, primary_selection_sponsored_used, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6::numeric, $7, $8, $9, $9, $10, $11, $12, NOW(), NOW())
 		 ON CONFLICT (address)
 		 DO UPDATE SET
 		   username = EXCLUDED.username,
 		   avatar_url = EXCLUDED.avatar_url,
+		   reputation_score = EXCLUDED.reputation_score,
 		   username_count = EXCLUDED.username_count,
 		   tcnr = EXCLUDED.tcnr,
 		   kyc_status = EXCLUDED.kyc_status,
@@ -215,6 +219,7 @@ func (r *PostgresAuthRepository) UpsertUser(user entities.User) error {
 		address,
 		user.Username,
 		strings.TrimSpace(user.AvatarURL),
+		user.ReputationScore,
 		user.UsernameCount,
 		strings.TrimSpace(user.TCNR),
 		strings.TrimSpace(user.KYCStatus),

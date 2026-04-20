@@ -12,6 +12,7 @@ type UserModel struct {
 	Address                       string
 	Username                      string
 	AvatarURL                     string
+	ReputationScore               int64
 	UsernameCount                 int
 	PrimarySelectionSponsoredUsed bool
 	TCNR                          string
@@ -27,6 +28,7 @@ func UserModelFromEntity(user entities.User) UserModel {
 		Address:                       strings.ToLower(strings.TrimSpace(user.Address)),
 		Username:                      strings.TrimSpace(user.Username),
 		AvatarURL:                     strings.TrimSpace(user.AvatarURL),
+		ReputationScore:               user.ReputationScore,
 		UsernameCount:                 user.UsernameCount,
 		PrimarySelectionSponsoredUsed: user.PrimarySelectionSponsoredUsed,
 		TCNR:                          strings.TrimSpace(user.TCNR),
@@ -43,6 +45,7 @@ func (m UserModel) ToEntity() entities.User {
 		Address:                       m.Address,
 		Username:                      m.Username,
 		AvatarURL:                     m.AvatarURL,
+		ReputationScore:               m.ReputationScore,
 		UsernameCount:                 m.UsernameCount,
 		PrimarySelectionSponsoredUsed: m.PrimarySelectionSponsoredUsed,
 		TCNR:                          m.TCNR,

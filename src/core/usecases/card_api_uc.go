@@ -1,4 +1,4 @@
-package handler
+package usecases
 
 import (
 	"context"
@@ -12,12 +12,10 @@ import (
 	"sync"
 	"time"
 
-	adapterethclient "chainora-api/adapter/ethclient"
 	"chainora-api/core/constants"
 	"chainora-api/core/entities"
-	"chainora-api/core/usecases"
-	"chainora-api/rest/handler/requests"
-	"chainora-api/rest/handler/response"
+	"chainora-api/core/usecases/requests"
+	"chainora-api/core/usecases/response"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -107,7 +105,7 @@ type pendingCardChallenge struct {
 }
 
 type CardHandler struct {
-	repo                 usecases.AuthRepository
+	repo                 AuthRepository
 	validate             *validator.Validate
 	factoryRootPublicKey *ecdsa.PublicKey
 	chainoraRPCURL       string
@@ -119,7 +117,7 @@ type CardHandler struct {
 	pendingByID map[string]pendingCardChallenge
 }
 
-func NewCardHandler(repo usecases.AuthRepository, factoryRootPublicKeyHex, chainoraRPCURL, deviceVerifierPrivateKeyHex string) (*CardHandler, error) {
+func NewCardHandler(repo AuthRepository, factoryRootPublicKeyHex, chainoraRPCURL, deviceVerifierPrivateKeyHex string) (*CardHandler, error) {
 	factoryBytes, err := decodeHexBytes(factoryRootPublicKeyHex)
 	if err != nil {
 		return nil, fmt.Errorf("parse factory root public key: %w", err)
@@ -340,7 +338,7 @@ func (h *CardHandler) createOnChainDeviceAttestation(
 	walletAddress common.Address,
 	deviceAdapterAddress common.Address,
 ) (createDeviceAttestationResponse, error) {
-	client, err := adapterethclient.New(h.chainoraRPCURL)
+	client, err := gethethclient.Dial(strings.TrimSpace(h.chainoraRPCURL))
 	if err != nil {
 		return createDeviceAttestationResponse{}, fmt.Errorf("connect chainora rpc: %w", err)
 	}

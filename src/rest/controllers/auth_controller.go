@@ -1,59 +1,35 @@
 package controllers
 
 import (
-	"sync"
+	"database/sql"
+	"net/http"
 
-	"github.com/gorilla/websocket"
+	"chainora-api/core/usecases"
+
+	"github.com/gin-gonic/gin"
 )
 
-// WSHub stores websocket clients grouped by session ID.
-type WSHub struct {
-	mu      sync.RWMutex
-	clients map[string]map[*websocket.Conn]struct{}
+type AuthController struct {
+	handler *usecases.AuthHandler
 }
 
-func NewWSHub() *WSHub {
-	return &WSHub{clients: make(map[string]map[*websocket.Conn]struct{})}
+func NewAuthController(
+	authUsecase usecases.AuthUsecase,
+	issuer usecases.TokenIssuer,
+	db *sql.DB,
+	hub *usecases.WSHub,
+	usernameResolver usecases.UsernameResolver,
+	wsOriginChecker func(r *http.Request) bool,
+) *AuthController {
+	return &AuthController{handler: usecases.NewAuthHandler(authUsecase, issuer, db, hub, usernameResolver, wsOriginChecker)}
 }
 
-func (h *WSHub) Register(sessionID string, conn *websocket.Conn) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if _, ok := h.clients[sessionID]; !ok {
-		h.clients[sessionID] = make(map[*websocket.Conn]struct{})
-	}
-	h.clients[sessionID][conn] = struct{}{}
-}
-
-func (h *WSHub) Unregister(sessionID string, conn *websocket.Conn) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	conns, ok := h.clients[sessionID]
-	if !ok {
-		return
-	}
-	delete(conns, conn)
-	if len(conns) == 0 {
-		delete(h.clients, sessionID)
-	}
-}
-
-func (h *WSHub) Broadcast(sessionID string, message []byte) {
-	h.mu.RLock()
-	conns := make([]*websocket.Conn, 0)
-	if m, ok := h.clients[sessionID]; ok {
-		for conn := range m {
-			conns = append(conns, conn)
-		}
-	}
-	h.mu.RUnlock()
-
-	for _, conn := range conns {
-		if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
-			h.Unregister(sessionID, conn)
-			_ = conn.Close()
-		}
-	}
-}
+func (c *AuthController) InitSession(ctx *gin.Context)     { c.handler.InitSession(ctx) }
+func (c *AuthController) WaitForLoginWS(ctx *gin.Context)  { c.handler.WaitForLoginWS(ctx) }
+func (c *AuthController) NotifyProgress(ctx *gin.Context)  { c.handler.NotifyProgress(ctx) }
+func (c *AuthController) VerifySignature(ctx *gin.Context) { c.handler.VerifySignature(ctx) }
+func (c *AuthController) RefreshToken(ctx *gin.Context)    { c.handler.RefreshToken(ctx) }
+func (c *AuthController) Me(ctx *gin.Context)              { c.handler.Me(ctx) }
+func (c *AuthController) GetProfile(ctx *gin.Context)      { c.handler.GetProfile(ctx) }
+func (c *AuthController) ListProfiles(ctx *gin.Context)    { c.handler.ListProfiles(ctx) }
+func (c *AuthController) UpdateProfile(ctx *gin.Context)   { c.handler.UpdateProfile(ctx) }

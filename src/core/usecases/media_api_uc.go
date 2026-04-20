@@ -1,4 +1,4 @@
-package handler
+package usecases
 
 import (
 	"bytes"
@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"chainora-api/core/constants"
-	"chainora-api/rest/handler/response"
+	"chainora-api/core/usecases/response"
 
 	"github.com/gin-gonic/gin"
 )

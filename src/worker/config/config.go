@@ -55,7 +55,7 @@ func Load() Config {
 
 	intervalSec := raw.Scheduler.ScanIntervalSeconds
 	if intervalSec <= 0 {
-		intervalSec = 60
+		intervalSec = 20
 	}
 
 	timeoutSec := raw.Scheduler.RequestTimeoutSeconds

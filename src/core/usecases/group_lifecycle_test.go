@@ -1,4 +1,4 @@
-package handler
+package usecases
 
 import (
 	"math/big"

@@ -1,4 +1,4 @@
-package handler
+package usecases
 
 import (
 	"math/big"
@@ -104,7 +104,7 @@ func TestBuildPhasePermissions(t *testing.T) {
 	permissions := buildPhasePermissions(phasePermissionInput{
 		selectedPhase:          phaseFunding,
 		selectedPeriod:         1,
-		currentPeriod:          1,
+		maxPeriod:              3,
 		isCurrentActivePhase:   true,
 		viewerAddress:          "0x1111111111111111111111111111111111111111",
 		viewerIsMember:         true,
@@ -120,7 +120,7 @@ func TestBuildPhasePermissions(t *testing.T) {
 	permissions = buildPhasePermissions(phasePermissionInput{
 		selectedPhase:        phaseBidding,
 		selectedPeriod:       1,
-		currentPeriod:        1,
+		maxPeriod:            3,
 		isHistoricalView:     true,
 		viewerAddress:        "0x1111111111111111111111111111111111111111",
 		viewerIsMember:       true,
@@ -138,7 +138,7 @@ func TestBuildPhasePermissions(t *testing.T) {
 	permissions = buildPhasePermissions(phasePermissionInput{
 		selectedPhase:        phaseEnding,
 		selectedPeriod:       2,
-		currentPeriod:        2,
+		maxPeriod:            3,
 		isCurrentActivePhase: true,
 		viewerAddress:        "0x1111111111111111111111111111111111111111",
 		viewerIsMember:       true,
@@ -153,7 +153,7 @@ func TestBuildPhasePermissions(t *testing.T) {
 	permissions = buildPhasePermissions(phasePermissionInput{
 		selectedPhase:        phaseBidding,
 		selectedPeriod:       1,
-		currentPeriod:        1,
+		maxPeriod:            3,
 		isCurrentActivePhase: true,
 		viewerAddress:        "0x1111111111111111111111111111111111111111",
 		viewerIsMember:       true,
@@ -173,7 +173,7 @@ func TestBuildPhasePermissions(t *testing.T) {
 	permissions = buildPhasePermissions(phasePermissionInput{
 		selectedPhase:  phaseEnding,
 		selectedPeriod: 2,
-		currentPeriod:  2,
+		maxPeriod:      3,
 		viewerAddress:  "0x1111111111111111111111111111111111111111",
 		viewerIsMember: true,
 		groupStatus:    "archived",
@@ -186,7 +186,7 @@ func TestBuildPhasePermissions(t *testing.T) {
 	permissions = buildPhasePermissions(phasePermissionInput{
 		selectedPhase:        phaseFunding,
 		selectedPeriod:       1,
-		currentPeriod:        1,
+		maxPeriod:            3,
 		isCurrentActivePhase: true,
 		viewerAddress:        "0x1111111111111111111111111111111111111111",
 		viewerIsMember:       true,

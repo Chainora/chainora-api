@@ -1,4 +1,4 @@
-package handler
+package usecases
 
 import (
 	"encoding/json"
@@ -9,10 +9,9 @@ import (
 
 	entityrequest "chainora-api/core/entities/request"
 	entityresponse "chainora-api/core/entities/response"
-	"chainora-api/core/usecases"
-	"chainora-api/rest/controllers"
-	"chainora-api/rest/handler/requests"
-	"chainora-api/rest/handler/response"
+
+	"chainora-api/core/usecases/requests"
+	"chainora-api/core/usecases/response"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
@@ -21,17 +20,17 @@ import (
 
 // RelayerHandler exposes username relayer APIs.
 type RelayerHandler struct {
-	relayer  usecases.RelayerUsecase
-	hub      *controllers.WSHub
+	relayer  RelayerUsecase
+	hub      *WSHub
 	validate *validator.Validate
 	upgrader websocket.Upgrader
 }
 
-func NewRelayerHandler(relayer usecases.RelayerUsecase, hub *controllers.WSHub) *RelayerHandler {
+func NewRelayerHandler(relayer RelayerUsecase, hub *WSHub) *RelayerHandler {
 	return NewRelayerHandlerWithOriginChecker(relayer, hub, nil)
 }
 
-func NewRelayerHandlerWithOriginChecker(relayer usecases.RelayerUsecase, hub *controllers.WSHub, wsOriginChecker func(r *http.Request) bool) *RelayerHandler {
+func NewRelayerHandlerWithOriginChecker(relayer RelayerUsecase, hub *WSHub, wsOriginChecker func(r *http.Request) bool) *RelayerHandler {
 	if wsOriginChecker == nil {
 		wsOriginChecker = func(_ *http.Request) bool { return false }
 	}

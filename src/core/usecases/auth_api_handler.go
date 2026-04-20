@@ -1,17 +1,17 @@
-package handler
+package usecases
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"strings"
 
 	"chainora-api/core/constants"
 	entityrequest "chainora-api/core/entities/request"
-	"chainora-api/core/usecases"
-	"chainora-api/rest/controllers"
-	"chainora-api/rest/handler/requests"
-	"chainora-api/rest/handler/response"
+
+	"chainora-api/core/usecases/requests"
+	"chainora-api/core/usecases/response"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
@@ -35,9 +35,10 @@ type UsernameResolver interface {
 }
 
 func NewAuthHandler(
-	authUsecase usecases.AuthUsecase,
+	authUsecase AuthUsecase,
 	issuer TokenIssuer,
-	hub *controllers.WSHub,
+	db *sql.DB,
+	hub *WSHub,
 	usernameResolver UsernameResolver,
 	wsOriginChecker func(r *http.Request) bool,
 ) *AuthHandler {
@@ -82,6 +83,7 @@ func NewAuthHandler(
 			auth:     authUsecase,
 			issuer:   issuer,
 			validate: validate,
+			db:       db,
 			resolver: usernameResolver,
 		},
 		updateProfileUC: &updateProfileUsecase{

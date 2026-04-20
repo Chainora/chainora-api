@@ -140,6 +140,9 @@ func (r *InMemoryAuthRepository) UpsertUser(user entities.User) error {
 		if strings.TrimSpace(user.AvatarURL) == "" {
 			user.AvatarURL = oldUser.AvatarURL
 		}
+		if user.ReputationScore == 0 && oldUser.ReputationScore != 0 {
+			user.ReputationScore = oldUser.ReputationScore
+		}
 		if strings.TrimSpace(user.TCNR) == "" {
 			user.TCNR = oldUser.TCNR
 		}

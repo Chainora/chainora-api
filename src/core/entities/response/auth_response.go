@@ -49,6 +49,7 @@ type ProfileResponse struct {
 	Address                       string `json:"address"`
 	Username                      string `json:"username"`
 	AvatarURL                     string `json:"avatarUrl"`
+	ReputationScore               string `json:"reputationScore"`
 	UsernameCount                 int    `json:"usernameCount"`
 	PrimarySelectionSponsoredUsed bool   `json:"primarySelectionSponsoredUsed"`
 	TCNR                          string `json:"tCNR"`
@@ -57,7 +58,9 @@ type ProfileResponse struct {
 
 // BasicProfileResponse is returned from profile lookup endpoints.
 type BasicProfileResponse struct {
-	Address   string `json:"address"`
-	Username  string `json:"username"`
-	AvatarURL string `json:"avatarUrl"`
+	Address           string `json:"address"`
+	Username          string `json:"username"`
+	AvatarURL         string `json:"avatarUrl"`
+	ReputationScore   string `json:"reputationScore"`
+	JoinedGroupsCount int    `json:"joinedGroupsCount"`
 }

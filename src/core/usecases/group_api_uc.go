@@ -1,4 +1,4 @@
-package handler
+package usecases
 
 import (
 	"context"
@@ -8,14 +8,15 @@ import (
 	"log"
 	"math/big"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
 
-	adapterethclient "chainora-api/adapter/ethclient"
+	adaptermodels "chainora-api/adapter/models"
 	"chainora-api/core/constants"
-	"chainora-api/rest/handler/requests"
-	"chainora-api/rest/handler/response"
+	"chainora-api/core/usecases/requests"
+	"chainora-api/core/usecases/response"
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -50,6 +51,7 @@ type createGroupRequest struct {
 	GroupImageURL      string `json:"groupImageUrl" validate:"omitempty,url,max=2048"`
 	PublicRecruitment  *bool  `json:"publicRecruitment"`
 	ContributionAmount string `json:"contributionAmount" validate:"required"`
+	MinReputation      string `json:"minReputation"`
 	TargetMembers      int    `json:"targetMembers" validate:"required,min=3,max=255"`
 	PeriodDuration     int    `json:"periodDuration" validate:"required,min=1"`
 	ContributionWindow int    `json:"contributionWindow" validate:"required,min=1"`
@@ -58,10 +60,14 @@ type createGroupRequest struct {
 }
 
 type listGroupsRequest struct {
-	Scope      string `form:"scope"`
-	Q          string `form:"q"`
-	Visibility string `form:"visibility"`
-	Sync       bool   `form:"sync"`
+	Scope         string `form:"scope"`
+	Q             string `form:"q"`
+	Visibility    string `form:"visibility"`
+	SortBy        string `form:"sortBy"`
+	SortOrder     string `form:"sortOrder"`
+	MinReputation string `form:"minReputation"`
+	MaxReputation string `form:"maxReputation"`
+	Sync          bool   `form:"sync"`
 }
 
 type groupItem struct {
@@ -73,6 +79,7 @@ type groupItem struct {
 	GroupImageURL       string `json:"groupImageUrl"`
 	PublicRecruitment   bool   `json:"publicRecruitment"`
 	ContributionAmount  string `json:"contributionAmount"`
+	MinReputation       string `json:"minReputation"`
 	TargetMembers       int    `json:"targetMembers"`
 	PeriodDuration      int    `json:"periodDuration"`
 	ContributionWindow  int    `json:"contributionWindow"`
@@ -104,11 +111,17 @@ type poolState struct {
 	CurrentPeriod       string
 	PublicRecruitment   bool
 	ActiveMemberCount   int
+	ActiveMembers       []common.Address
 	CycleCompleted      bool
 	ExtendVoteOpen      bool
+	ExtendVoteDeadline  int64
 	ExtendVoteRound     string
 	ExtendYesVotes      string
 	ExtendRequiredVotes int
+	AuctionReady        bool
+	AuctionCloseReady   bool
+	FinalizeReady       bool
+	DefaultPending      bool
 }
 
 type poolStateReader struct {
@@ -138,9 +151,44 @@ func (h *GroupHandler) ListGroups(ctx *gin.Context) {
 		return
 	}
 
-	search := strings.TrimSpace(req.Q)
-	scope := strings.ToLower(strings.TrimSpace(req.Scope))
-	visibility := strings.ToLower(strings.TrimSpace(req.Visibility))
+	queryModel, queryModelErr := adaptermodels.NewGroupListModel(
+		req.Scope,
+		req.Q,
+		req.Visibility,
+		req.SortBy,
+		req.SortOrder,
+		req.MinReputation,
+		req.MaxReputation,
+		req.Sync,
+	)
+	if queryModelErr != nil {
+		response.WriteError(ctx, queryModelErr)
+		return
+	}
+
+	search := queryModel.Q
+	scope := queryModel.Scope
+	visibility := queryModel.Visibility
+	sortBy, sortErr := normalizeGroupSortBy(queryModel.SortBy)
+	if sortErr != nil {
+		response.WriteError(ctx, sortErr)
+		return
+	}
+	sortOrder, orderErr := normalizeSortOrder(queryModel.SortOrder)
+	if orderErr != nil {
+		response.WriteError(ctx, orderErr)
+		return
+	}
+	minReputation, minRepErr := normalizeOptionalNumericFilter(queryModel.MinReputation, "minReputation")
+	if minRepErr != nil {
+		response.WriteError(ctx, minRepErr)
+		return
+	}
+	maxReputation, maxRepErr := normalizeOptionalNumericFilter(queryModel.MaxReputation, "maxReputation")
+	if maxRepErr != nil {
+		response.WriteError(ctx, maxRepErr)
+		return
+	}
 	ownerFilter := ""
 	recruitingOnly := false
 	publicOnly := false
@@ -183,13 +231,24 @@ func (h *GroupHandler) ListGroups(ctx *gin.Context) {
 		return
 	}
 
-	items, err := h.queryGroups(ctx, search, ownerFilter, recruitingOnly, publicOnly, privateOnly)
+	items, err := h.queryGroups(
+		ctx,
+		search,
+		ownerFilter,
+		recruitingOnly,
+		publicOnly,
+		privateOnly,
+		sortBy,
+		sortOrder,
+		minReputation,
+		maxReputation,
+	)
 	if err != nil {
 		response.WriteError(ctx, err)
 		return
 	}
 
-	if req.Sync {
+	if queryModel.Sync {
 		updated := h.refreshStaleGroupStates(ctx.Request.Context(), items)
 		response.Write(ctx.Writer, response.Ok(updated))
 		return
@@ -222,7 +281,7 @@ func (h *GroupHandler) GetGroup(ctx *gin.Context) {
 	// Visibility and membership enforcement remain on contract calls.
 
 	if strings.EqualFold(strings.TrimSpace(ctx.Query("sync")), "true") {
-		if refreshed, refreshErr := h.refreshGroupState(ctx.Request.Context(), item); refreshErr == nil {
+		if refreshed, refreshErr := h.refreshGroupState(ctx.Request.Context(), item, ""); refreshErr == nil {
 			item = refreshed
 		}
 	} else {
@@ -255,50 +314,46 @@ func (h *GroupHandler) CreateGroup(ctx *gin.Context) {
 		return
 	}
 
-	if req.ContributionWindow+req.AuctionWindow >= req.PeriodDuration {
-		response.WriteError(ctx, fmt.Errorf("invalid config: auctionWindow (bidding) + contributionWindow (post-auction distribution window) must be less than periodDuration"))
-		return
-	}
-
-	if req.AuctionWindow >= req.PeriodDuration {
-		response.WriteError(ctx, fmt.Errorf("invalid config: auctionWindow must be less than periodDuration"))
-		return
-	}
-
-	if req.ContributionWindow >= req.PeriodDuration {
-		response.WriteError(ctx, fmt.Errorf("invalid config: contributionWindow must be less than periodDuration"))
-		return
-	}
-
-	if _, ok := new(big.Int).SetString(strings.TrimSpace(req.PoolID), 10); !ok {
-		response.WriteError(ctx, fmt.Errorf("invalid poolId"))
-		return
-	}
-
-	if _, ok := new(big.Int).SetString(strings.TrimSpace(req.ContributionAmount), 10); !ok {
-		response.WriteError(ctx, fmt.Errorf("invalid contributionAmount"))
-		return
-	}
-
 	publicRecruitment := true
 	if req.PublicRecruitment != nil {
 		publicRecruitment = *req.PublicRecruitment
 	}
 
-	item, upsertErr := h.upsertGroup(ctx,
-		strings.TrimSpace(req.PoolID),
-		strings.ToLower(strings.TrimSpace(req.PoolAddress)),
-		strings.ToLower(strings.TrimSpace(creatorAddress)),
-		strings.TrimSpace(req.Name),
-		strings.TrimSpace(req.Description),
-		strings.TrimSpace(req.GroupImageURL),
+	createModel, createModelErr := adaptermodels.NewGroupModelForCreate(
+		req.PoolID,
+		req.PoolAddress,
+		req.Name,
+		req.Description,
+		req.GroupImageURL,
 		publicRecruitment,
-		strings.TrimSpace(req.ContributionAmount),
+		req.ContributionAmount,
+		req.MinReputation,
 		req.TargetMembers,
 		req.PeriodDuration,
 		req.ContributionWindow,
 		req.AuctionWindow,
-		strings.TrimSpace(req.TxHash),
+		req.TxHash,
+	)
+	if createModelErr != nil {
+		response.WriteError(ctx, createModelErr)
+		return
+	}
+
+	item, upsertErr := h.upsertGroup(ctx,
+		createModel.PoolID,
+		createModel.PoolAddress,
+		strings.ToLower(strings.TrimSpace(creatorAddress)),
+		createModel.Name,
+		createModel.Description,
+		createModel.GroupImageURL,
+		createModel.PublicRecruitment,
+		createModel.ContributionAmount,
+		createModel.MinReputation,
+		createModel.TargetMembers,
+		createModel.PeriodDuration,
+		createModel.ContributionWindow,
+		createModel.AuctionWindow,
+		createModel.TxHash,
 	)
 	if upsertErr != nil {
 		response.WriteError(ctx, upsertErr)
@@ -480,9 +535,16 @@ func (h *GroupHandler) queryGroups(
 	ctx *gin.Context,
 	search, ownerFilter string,
 	recruitingOnly, publicOnly, privateOnly bool,
+	sortBy, sortOrder, minReputation, maxReputation string,
 ) ([]groupItem, error) {
-	rows, err := h.db.QueryContext(
-		ctx.Request.Context(),
+	orderClause := "created_at DESC"
+	if sortBy == "min_reputation" {
+		orderClause = fmt.Sprintf("min_reputation %s, created_at DESC", sortOrder)
+	} else {
+		orderClause = fmt.Sprintf("created_at %s", sortOrder)
+	}
+
+	query := fmt.Sprintf(
 		`SELECT pool_id::text,
 		        pool_address,
 		        creator_address,
@@ -491,6 +553,7 @@ func (h *GroupHandler) queryGroups(
 		        COALESCE(image_url, ''),
 		        public_recruitment,
 		        contribution_amount::text,
+		        COALESCE(min_reputation, 0)::text,
 		        target_members,
 		        period_duration,
 		        contribution_window,
@@ -506,18 +569,28 @@ func (h *GroupHandler) queryGroups(
 		        created_at,
 		        updated_at
 		 FROM groups
-		 WHERE ($1 = '' OR name ILIKE '%' || $1 || '%' OR pool_address ILIKE '%' || $1 || '%')
+		 WHERE ($1 = '' OR name ILIKE '%%' || $1 || '%%' OR pool_address ILIKE '%%' || $1 || '%%')
 		   AND ($2 = '' OR creator_address = $2)
 		   AND ($3 = FALSE OR status = 0)
 		   AND ($4 = FALSE OR public_recruitment = TRUE)
 		   AND ($5 = FALSE OR public_recruitment = FALSE)
-		 ORDER BY created_at DESC
+		   AND ($6 = '' OR COALESCE(min_reputation, 0) >= $6::numeric)
+		   AND ($7 = '' OR COALESCE(min_reputation, 0) <= $7::numeric)
+		 ORDER BY %s
 		 LIMIT 200`,
+		orderClause,
+	)
+
+	rows, err := h.db.QueryContext(
+		ctx.Request.Context(),
+		query,
 		search,
 		ownerFilter,
 		recruitingOnly,
 		publicOnly,
 		privateOnly,
+		minReputation,
+		maxReputation,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list groups: %w", err)
@@ -539,6 +612,7 @@ func (h *GroupHandler) queryGroups(
 			&item.GroupImageURL,
 			&item.PublicRecruitment,
 			&item.ContributionAmount,
+			&item.MinReputation,
 			&item.TargetMembers,
 			&item.PeriodDuration,
 			&item.ContributionWindow,
@@ -584,6 +658,7 @@ func (h *GroupHandler) upsertGroup(
 	groupImageURL string,
 	publicRecruitment bool,
 	contributionAmount string,
+	minReputation string,
 	targetMembers int,
 	periodDuration int,
 	contributionWindow int,
@@ -606,6 +681,7 @@ func (h *GroupHandler) upsertGroup(
 			image_url,
 			public_recruitment,
 			contribution_amount,
+			min_reputation,
 			target_members,
 			period_duration,
 			contribution_window,
@@ -621,11 +697,12 @@ func (h *GroupHandler) upsertGroup(
 				$6,
 				$7,
 				$8::numeric,
-				$9,
+				$9::numeric,
 				$10,
 				$11,
 				$12,
 				$13,
+				$14,
 				NOW()
 			 )
 			 ON CONFLICT (pool_address)
@@ -636,6 +713,7 @@ func (h *GroupHandler) upsertGroup(
 				image_url = EXCLUDED.image_url,
 				public_recruitment = EXCLUDED.public_recruitment,
 				contribution_amount = EXCLUDED.contribution_amount,
+				min_reputation = EXCLUDED.min_reputation,
 				target_members = EXCLUDED.target_members,
 			period_duration = EXCLUDED.period_duration,
 			contribution_window = EXCLUDED.contribution_window,
@@ -672,6 +750,7 @@ func (h *GroupHandler) upsertGroup(
 		groupImageURL,
 		publicRecruitment,
 		contributionAmount,
+		minReputation,
 		targetMembers,
 		periodDuration,
 		contributionWindow,
@@ -704,6 +783,7 @@ func (h *GroupHandler) upsertGroup(
 	if err != nil {
 		return groupItem{}, fmt.Errorf("create group: %w", err)
 	}
+	item.MinReputation = minReputation
 
 	if lastSyncedAt.Valid {
 		item.LastSyncedAt = lastSyncedAt.Time.UTC().Format(time.RFC3339)
@@ -731,6 +811,7 @@ func (h *GroupHandler) queryGroupByPoolID(ctx *gin.Context, poolID string) (grou
 		        COALESCE(image_url, ''),
 		        public_recruitment,
 		        contribution_amount::text,
+		        COALESCE(min_reputation, 0)::text,
 		        target_members,
 		        period_duration,
 		        contribution_window,
@@ -758,6 +839,7 @@ func (h *GroupHandler) queryGroupByPoolID(ctx *gin.Context, poolID string) (grou
 		&item.GroupImageURL,
 		&item.PublicRecruitment,
 		&item.ContributionAmount,
+		&item.MinReputation,
 		&item.TargetMembers,
 		&item.PeriodDuration,
 		&item.ContributionWindow,
@@ -804,7 +886,7 @@ func (h *GroupHandler) refreshStaleGroupStates(ctx context.Context, items []grou
 			continue
 		}
 
-		refreshed, err := h.refreshGroupState(ctx, item)
+		refreshed, err := h.refreshGroupState(ctx, item, "")
 		if err != nil {
 			updated = append(updated, item)
 			continue
@@ -838,7 +920,7 @@ func (h *GroupHandler) refreshStaleGroupStatesAsync(items []groupItem) {
 			ctx, cancel := context.WithTimeout(context.Background(), groupStateRefreshTimeout)
 			defer cancel()
 
-			if _, err := h.refreshGroupState(ctx, group); err != nil {
+			if _, err := h.refreshGroupState(ctx, group, ""); err != nil {
 				log.Printf("[groups] async state refresh failed pool=%s err=%v", normalizedPoolAddress, err)
 			}
 		}(item, poolAddress)
@@ -863,10 +945,11 @@ func (h *GroupHandler) endRefresh(poolAddress string) {
 	h.refreshMu.Unlock()
 }
 
-func (h *GroupHandler) refreshGroupState(ctx context.Context, item groupItem) (groupItem, error) {
+func (h *GroupHandler) refreshGroupState(ctx context.Context, item groupItem, triggerAddress string) (groupItem, error) {
 	if h.reader == nil {
 		return item, nil
 	}
+	wasCycleCompleted := item.CycleCompleted
 
 	state, err := h.reader.ReadPoolState(ctx, item.PoolAddress)
 	if err != nil {
@@ -917,7 +1000,91 @@ func (h *GroupHandler) refreshGroupState(ctx context.Context, item groupItem) (g
 	item.LastSyncedAt = now.Format(time.RFC3339)
 	item.UpdatedAt = now.Format(time.RFC3339)
 
+	if !wasCycleCompleted && state.CycleCompleted {
+		if applyErr := h.applyCycleCompletionBaseReputation(ctx, item, state.ActiveMembers); applyErr != nil {
+			log.Printf("[groups] apply base reputation failed pool=%s cycle=%s err=%v", item.PoolID, state.CurrentCycle, applyErr)
+		}
+		normalizedTrigger := strings.ToLower(strings.TrimSpace(triggerAddress))
+		if normalizedTrigger != "" && containsAddress(state.ActiveMembers, common.HexToAddress(normalizedTrigger)) {
+			if bonusErr := h.applyCycleCompletionTriggerBonus(ctx, item, normalizedTrigger); bonusErr != nil {
+				log.Printf("[groups] apply trigger bonus failed pool=%s cycle=%s trigger=%s err=%v", item.PoolID, state.CurrentCycle, normalizedTrigger, bonusErr)
+			}
+		}
+	}
+
 	return item, nil
+}
+
+func (h *GroupHandler) applyCycleCompletionBaseReputation(ctx context.Context, item groupItem, activeMembers []common.Address) error {
+	if h == nil || h.db == nil {
+		return nil
+	}
+
+	poolID := strings.TrimSpace(item.PoolID)
+	cycleID := strings.TrimSpace(item.CurrentCycle)
+	if poolID == "" || cycleID == "" {
+		return nil
+	}
+
+	for _, member := range uniqueAddresses(activeMembers) {
+		address := strings.ToLower(strings.TrimSpace(member.Hex()))
+		if address == "" {
+			continue
+		}
+
+		_, err := h.db.ExecContext(
+			ctx,
+			`WITH inserted AS (
+			    INSERT INTO user_reputation_ledger (user_address, pool_id, cycle_id, reason, points, triggered_by)
+			    VALUES ($1, $2::numeric, $3::numeric, 'cycle_complete_base', 10, '')
+			    ON CONFLICT (user_address, pool_id, cycle_id, reason) DO NOTHING
+			    RETURNING user_address, points
+			  )
+			  INSERT INTO users (address, reputation_score, created_at, updated_at)
+			  SELECT user_address, points, NOW(), NOW() FROM inserted
+			  ON CONFLICT (address)
+			  DO UPDATE SET reputation_score = users.reputation_score + EXCLUDED.reputation_score, updated_at = NOW()`,
+			address,
+			poolID,
+			cycleID,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (h *GroupHandler) applyCycleCompletionTriggerBonus(ctx context.Context, item groupItem, triggerAddress string) error {
+	if h == nil || h.db == nil {
+		return nil
+	}
+
+	poolID := strings.TrimSpace(item.PoolID)
+	cycleID := strings.TrimSpace(item.CurrentCycle)
+	trigger := strings.ToLower(strings.TrimSpace(triggerAddress))
+	if poolID == "" || cycleID == "" || trigger == "" {
+		return nil
+	}
+
+	_, err := h.db.ExecContext(
+		ctx,
+		`WITH inserted AS (
+		    INSERT INTO user_reputation_ledger (user_address, pool_id, cycle_id, reason, points, triggered_by)
+		    VALUES ($1, $2::numeric, $3::numeric, 'cycle_complete_trigger_bonus', 2, $1)
+		    ON CONFLICT (user_address, pool_id, cycle_id, reason) DO NOTHING
+		    RETURNING user_address, points
+		  )
+		  INSERT INTO users (address, reputation_score, created_at, updated_at)
+		  SELECT user_address, points, NOW(), NOW() FROM inserted
+		  ON CONFLICT (address)
+		  DO UPDATE SET reputation_score = users.reputation_score + EXCLUDED.reputation_score, updated_at = NOW()`,
+		trigger,
+		poolID,
+		cycleID,
+	)
+	return err
 }
 
 func isStale(lastSyncedAt string, now time.Time) bool {
@@ -931,6 +1098,44 @@ func isStale(lastSyncedAt string, now time.Time) bool {
 	}
 
 	return now.Sub(parsed.UTC()) >= groupStateSyncInterval
+}
+
+func normalizeGroupSortBy(raw string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	switch normalized {
+	case "", "created_at":
+		return "created_at", nil
+	case "min_reputation", "minreputation":
+		return "min_reputation", nil
+	default:
+		return "", fmt.Errorf("invalid sortBy: %s", raw)
+	}
+}
+
+func normalizeSortOrder(raw string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(raw))
+	switch normalized {
+	case "", "desc":
+		return "DESC", nil
+	case "asc":
+		return "ASC", nil
+	default:
+		return "", fmt.Errorf("invalid sortOrder: %s", raw)
+	}
+}
+
+func normalizeOptionalNumericFilter(raw string, field string) (string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", nil
+	}
+
+	value, ok := new(big.Int).SetString(trimmed, 10)
+	if !ok || value.Sign() < 0 {
+		return "", fmt.Errorf("invalid %s", field)
+	}
+
+	return value.String(), nil
 }
 
 func deriveGroupStatus(poolStatus int, periodStatus int, cycleCompleted bool, extendVoteOpen bool) string {
@@ -1029,7 +1234,7 @@ func newPoolStateReader(rpcURL string) *poolStateReader {
 		return nil
 	}
 
-	client, err := adapterethclient.New(url)
+	client, err := gethethclient.Dial(strings.TrimSpace(url))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[groups] failed to create chain rpc client: %v\n", err)
 		return nil
@@ -1043,7 +1248,6 @@ func newPoolStateReader(rpcURL string) *poolStateReader {
 			{"type":"function","name":"activeMemberCount","stateMutability":"view","inputs":[],"outputs":[{"type":"uint256"}]},
 			{"type":"function","name":"activeMembers","stateMutability":"view","inputs":[],"outputs":[{"type":"address[]"}]},
 			{"type":"function","name":"members","stateMutability":"view","inputs":[],"outputs":[{"type":"address[]"}]},
-			{"type":"function","name":"allMembers","stateMutability":"view","inputs":[],"outputs":[{"type":"address[]"}]},
 			{"type":"function","name":"isMember","stateMutability":"view","inputs":[{"type":"address"}],"outputs":[{"type":"bool"}]},
 			{"type":"function","name":"isActiveMember","stateMutability":"view","inputs":[{"type":"address"}],"outputs":[{"type":"bool"}]},
 			{"type":"function","name":"hasContributed","stateMutability":"view","inputs":[{"type":"uint256"},{"type":"uint256"},{"type":"address"}],"outputs":[{"type":"bool"}]},
@@ -1052,7 +1256,8 @@ func newPoolStateReader(rpcURL string) *poolStateReader {
 			{"type":"function","name":"claimableArchiveRefund","stateMutability":"view","inputs":[{"type":"address"}],"outputs":[{"type":"uint256"}]},
 			{"type":"function","name":"cycleCompleted","stateMutability":"view","inputs":[],"outputs":[{"type":"bool"}]},
 			{"type":"function","name":"extendVoteState","stateMutability":"view","inputs":[],"outputs":[{"type":"bool"},{"type":"uint256"},{"type":"uint256"}]},
-			{"type":"function","name":"periodInfo","stateMutability":"view","inputs":[{"type":"uint256"},{"type":"uint256"}],"outputs":[{"type":"uint8"},{"type":"uint64"},{"type":"uint64"},{"type":"uint64"},{"type":"address"},{"type":"address"},{"type":"uint256"},{"type":"uint256"},{"type":"uint256"},{"type":"bool"},{"type":"bytes32"}]}
+			{"type":"function","name":"periodInfo","stateMutability":"view","inputs":[{"type":"uint256"},{"type":"uint256"}],"outputs":[{"type":"uint8"},{"type":"uint64"},{"type":"uint64"},{"type":"uint64"},{"type":"address"},{"type":"address"},{"type":"uint256"},{"type":"uint256"},{"type":"uint256"},{"type":"bool"},{"type":"bytes32"}]},
+			{"type":"function","name":"runtimeStatus","stateMutability":"view","inputs":[],"outputs":[{"name":"status","type":"tuple","components":[{"name":"poolStatus","type":"uint8"},{"name":"currentCycle","type":"uint256"},{"name":"currentPeriod","type":"uint256"},{"name":"storedPeriodStatus","type":"uint8"},{"name":"startAt","type":"uint64"},{"name":"contributionDeadline","type":"uint64"},{"name":"auctionDeadline","type":"uint64"},{"name":"payoutDeadline","type":"uint64"},{"name":"cycleCompleted","type":"bool"},{"name":"extendVoteOpen","type":"bool"},{"name":"extendVoteDeadline","type":"uint64"},{"name":"allActiveContributed","type":"bool"},{"name":"defaultPending","type":"bool"},{"name":"auctionReady","type":"bool"},{"name":"auctionCloseReady","type":"bool"},{"name":"finalizeReady","type":"bool"},{"name":"extendVoteExpired","type":"bool"},{"name":"unpaidActiveMembers","type":"address[]"}]}]}
 		]`))
 	if parseErr != nil {
 		client.Close()
@@ -1095,11 +1300,6 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 		return poolState{}, err
 	}
 
-	cycleCompletedRaw, err := r.call(ctx, address, "cycleCompleted")
-	if err != nil {
-		return poolState{}, err
-	}
-
 	statusValue, ok := statusRaw[0].(uint8)
 	if !ok {
 		return poolState{}, errors.New("invalid poolStatus value")
@@ -1125,14 +1325,17 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 		return poolState{}, errors.New("invalid activeMemberCount value")
 	}
 
-	cycleCompletedValue, ok := cycleCompletedRaw[0].(bool)
-	if !ok {
-		return poolState{}, errors.New("invalid cycleCompleted value")
+	cycleCompletedValue := false
+	if cycleCompletedRaw, cycleErr := r.call(ctx, address, "cycleCompleted"); cycleErr == nil && len(cycleCompletedRaw) > 0 {
+		if parsed, parsedOK := cycleCompletedRaw[0].(bool); parsedOK {
+			cycleCompletedValue = parsed
+		}
 	}
 
 	extendVoteOpenValue := false
 	extendVoteRoundValue := big.NewInt(0)
 	extendYesVotesValue := big.NewInt(0)
+	extendVoteDeadlineValue := int64(0)
 	extendVoteStateRaw, extendVoteErr := r.call(ctx, address, "extendVoteState")
 	if extendVoteErr == nil {
 		open, round, yesVotes, parseErr := parseExtendVoteStateOutput(extendVoteStateRaw)
@@ -1145,7 +1348,30 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 
 	currentPeriodStatusValue := 0
 	currentContributionDeadline := int64(0)
+	auctionReady := false
+	auctionCloseReady := false
+	finalizeReady := false
+	defaultPending := false
 	nowUnix := time.Now().UTC().Unix()
+
+	runtimeRaw, runtimeErr := r.call(ctx, address, "runtimeStatus")
+	if runtimeErr == nil {
+		if runtimeSnapshot, runtimeParseErr := parseRuntimeStatusOutput(runtimeRaw); runtimeParseErr == nil {
+			statusValue = uint8(runtimeSnapshot.PoolStatus)
+			currentCycleValue = runtimeSnapshot.CurrentCycle
+			currentPeriodValue = runtimeSnapshot.CurrentPeriod
+			currentPeriodStatusValue = runtimeSnapshot.StoredPeriodStatus
+			currentContributionDeadline = runtimeSnapshot.ContributionDeadline
+			cycleCompletedValue = runtimeSnapshot.CycleCompleted
+			extendVoteOpenValue = runtimeSnapshot.ExtendVoteOpen
+			extendVoteDeadlineValue = runtimeSnapshot.ExtendVoteDeadline
+			auctionReady = runtimeSnapshot.AuctionReady
+			auctionCloseReady = runtimeSnapshot.AuctionCloseReady
+			finalizeReady = runtimeSnapshot.FinalizeReady
+			defaultPending = runtimeSnapshot.DefaultPending
+		}
+	}
+
 	if statusValue == 1 && currentCycleValue.Sign() > 0 && currentPeriodValue.Sign() > 0 {
 		periodInfoRaw, periodErr := r.call(
 			ctx,
@@ -1163,6 +1389,12 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 			}
 			if len(periodInfoRaw) > 2 {
 				currentContributionDeadline = int64(toUint64(periodInfoRaw[2]))
+			}
+			if len(periodInfoRaw) > 3 {
+				auctionDeadline := int64(toUint64(periodInfoRaw[3]))
+				if auctionDeadline > 0 && nowUnix >= auctionDeadline {
+					auctionCloseReady = true
+				}
 			}
 		}
 	}
@@ -1190,6 +1422,12 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 			allActiveContributed = contributedAll
 		}
 	}
+	if !auctionReady {
+		auctionReady = currentPeriodStatusValue == 0 && currentContributionDeadline > 0 && nowUnix >= currentContributionDeadline && allActiveContributed
+	}
+	if !defaultPending {
+		defaultPending = currentPeriodStatusValue == 0 && currentContributionDeadline > 0 && nowUnix >= currentContributionDeadline && !allActiveContributed
+	}
 
 	groupStatus := deriveTemporalGroupStatusFromSnapshot(
 		int(statusValue),
@@ -1200,6 +1438,28 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 		nowUnix,
 		allActiveContributed,
 	)
+	if statusValue == 1 && !cycleCompletedValue {
+		switch currentPeriodStatusValue {
+		case 0:
+			if defaultPending {
+				groupStatus = "deadlinepassed"
+			} else if auctionReady {
+				groupStatus = "bidding"
+			} else {
+				groupStatus = "funding"
+			}
+		case 1:
+			groupStatus = "bidding"
+		case 2:
+			if finalizeReady {
+				groupStatus = "ended_period"
+			} else {
+				groupStatus = "payout"
+			}
+		case 3:
+			groupStatus = "ended_period"
+		}
+	}
 
 	return poolState{
 		Status:              int(statusValue),
@@ -1210,11 +1470,17 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 		CurrentPeriod:       currentPeriodValue.String(),
 		PublicRecruitment:   publicRecruitmentValue,
 		ActiveMemberCount:   activeMemberCount,
+		ActiveMembers:       activeMembersSnapshot,
 		CycleCompleted:      cycleCompletedValue,
 		ExtendVoteOpen:      extendVoteOpenValue,
+		ExtendVoteDeadline:  extendVoteDeadlineValue,
 		ExtendVoteRound:     extendVoteRoundValue.String(),
 		ExtendYesVotes:      extendYesVotesValue.String(),
 		ExtendRequiredVotes: activeMemberCount,
+		AuctionReady:        auctionReady,
+		AuctionCloseReady:   auctionCloseReady,
+		FinalizeReady:       finalizeReady,
+		DefaultPending:      defaultPending,
 	}, nil
 }
 
@@ -1239,6 +1505,76 @@ func parseExtendVoteStateOutput(raw []any) (bool, *big.Int, *big.Int, error) {
 	}
 
 	return open, round, yesVotes, nil
+}
+
+type runtimeStatusSnapshot struct {
+	PoolStatus           int
+	CurrentCycle         *big.Int
+	CurrentPeriod        *big.Int
+	StoredPeriodStatus   int
+	ContributionDeadline int64
+	AuctionDeadline      int64
+	PayoutDeadline       int64
+	CycleCompleted       bool
+	ExtendVoteOpen       bool
+	ExtendVoteDeadline   int64
+	DefaultPending       bool
+	AuctionReady         bool
+	AuctionCloseReady    bool
+	FinalizeReady        bool
+	ExtendVoteExpired    bool
+}
+
+func parseRuntimeStatusOutput(raw []any) (runtimeStatusSnapshot, error) {
+	if len(raw) == 0 {
+		return runtimeStatusSnapshot{}, errors.New("invalid runtimeStatus output length")
+	}
+
+	tuple := reflect.ValueOf(raw[0])
+	if tuple.Kind() == reflect.Pointer {
+		tuple = tuple.Elem()
+	}
+	if tuple.Kind() != reflect.Struct {
+		return runtimeStatusSnapshot{}, errors.New("invalid runtimeStatus output type")
+	}
+
+	valueAt := func(name string, index int) any {
+		if field := tuple.FieldByName(name); field.IsValid() {
+			return field.Interface()
+		}
+		if index >= 0 && index < tuple.NumField() {
+			return tuple.Field(index).Interface()
+		}
+		return nil
+	}
+
+	poolStatusValue := int(toUint64(valueAt("PoolStatus", 0)))
+	currentCycle, currentCycleOK := asBigInt(valueAt("CurrentCycle", 1))
+	if !currentCycleOK {
+		currentCycle = big.NewInt(0)
+	}
+	currentPeriod, currentPeriodOK := asBigInt(valueAt("CurrentPeriod", 2))
+	if !currentPeriodOK {
+		currentPeriod = big.NewInt(0)
+	}
+
+	return runtimeStatusSnapshot{
+		PoolStatus:           poolStatusValue,
+		CurrentCycle:         currentCycle,
+		CurrentPeriod:        currentPeriod,
+		StoredPeriodStatus:   int(toUint64(valueAt("StoredPeriodStatus", 3))),
+		ContributionDeadline: int64(toUint64(valueAt("ContributionDeadline", 5))),
+		AuctionDeadline:      int64(toUint64(valueAt("AuctionDeadline", 6))),
+		PayoutDeadline:       int64(toUint64(valueAt("PayoutDeadline", 7))),
+		CycleCompleted:       toBool(valueAt("CycleCompleted", 8)),
+		ExtendVoteOpen:       toBool(valueAt("ExtendVoteOpen", 9)),
+		ExtendVoteDeadline:   int64(toUint64(valueAt("ExtendVoteDeadline", 10))),
+		DefaultPending:       toBool(valueAt("DefaultPending", 12)),
+		AuctionReady:         toBool(valueAt("AuctionReady", 13)),
+		AuctionCloseReady:    toBool(valueAt("AuctionCloseReady", 14)),
+		FinalizeReady:        toBool(valueAt("FinalizeReady", 15)),
+		ExtendVoteExpired:    toBool(valueAt("ExtendVoteExpired", 16)),
+	}, nil
 }
 
 func asBigInt(value any) (*big.Int, bool) {
@@ -1353,24 +1689,22 @@ func (r *poolStateReader) readActiveMembers(
 	poolAddress common.Address,
 	expectedCount int,
 ) ([]common.Address, error) {
-	activeMembers, sourceMethod, err := r.readAddressList(ctx, poolAddress, "activeMembers", "members", "allMembers")
+	activeMembers, sourceMethod, err := r.readAddressList(ctx, poolAddress, "activeMembers", "members")
 	if err != nil {
 		return nil, err
 	}
 
-	if sourceMethod == "allMembers" {
-		if filtered, filterErr := r.filterActiveMembers(ctx, poolAddress, activeMembers); filterErr == nil && len(filtered) > 0 {
+	if sourceMethod == "members" {
+		filtered, filterErr := r.filterActiveMembers(ctx, poolAddress, activeMembers)
+		if filterErr != nil {
+			activeMembers = []common.Address{}
+		} else {
 			activeMembers = filtered
 		}
 	}
 
-	if expectedCount > 0 && len(activeMembers) < expectedCount {
-		allMembers, _, allErr := r.readAddressList(ctx, poolAddress, "allMembers")
-		if allErr == nil && len(allMembers) > 0 {
-			if filtered, filterErr := r.filterActiveMembers(ctx, poolAddress, allMembers); filterErr == nil && len(filtered) >= len(activeMembers) {
-				activeMembers = filtered
-			}
-		}
+	if expectedCount > 0 && len(activeMembers) > expectedCount {
+		activeMembers = activeMembers[:expectedCount]
 	}
 
 	return uniqueAddresses(activeMembers), nil

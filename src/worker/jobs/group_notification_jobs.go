@@ -21,6 +21,7 @@ const (
 	groupInviteCursorKey        = "group_invite_vote_ready"
 	groupInviteDefaultLookback  = uint64(3000)
 	fundingReminderWindowSecond = int64(10 * 60)
+	defaultInviteLabelFallback  = "a group member"
 )
 
 type GroupInviteNotificationJob struct {
@@ -272,28 +273,32 @@ func (j *GroupInviteNotificationJob) Run(ctx context.Context) error {
 		}
 
 		cacheKey := strings.ToLower(strings.TrimSpace(eventLog.Address.Hex())) + ":" + proposalIDText
-		proposalLog, cached := proposalLogCache[cacheKey]
-		if !cached {
+		proposalLog, hasProposalLog := proposalLogCache[cacheKey]
+		if !hasProposalLog {
 			proposedLog, proposedErr := j.findInviteProposedLog(ctx, eventLog.Address, proposalID, eventLog.BlockNumber)
 			if proposedErr != nil {
 				log.Printf("[worker][%s] pool=%s proposal=%s read proposal log failed: %v", j.Name(), group.poolID, proposalIDText, proposedErr)
-				if firstProcessErr == nil {
-					firstProcessErr = proposedErr
-				}
-				continue
+			} else if proposedLog != nil && len(proposedLog.Topics) >= 4 {
+				proposalLog = *proposedLog
+				proposalLogCache[cacheKey] = proposalLog
+				hasProposalLog = true
 			}
-			if proposedLog == nil || len(proposedLog.Topics) < 4 {
-				continue
-			}
-			proposalLog = *proposedLog
-			proposalLogCache[cacheKey] = proposalLog
+		}
+
+		quorumBlock := eventLog.BlockNumber
+		inviterAddressLower := ""
+		inviterDisplayName := defaultInviteLabelFallback
+		if hasProposalLog && len(proposalLog.Topics) >= 4 {
+			quorumBlock = proposalLog.BlockNumber
+			inviterAddress := common.BytesToAddress(proposalLog.Topics[3].Bytes()[12:]).Hex()
+			inviterAddressLower = strings.ToLower(strings.TrimSpace(inviterAddress))
 		}
 
 		quorumSnapshot, cachedQuorum := quorumCache[cacheKey]
 		if !cachedQuorum {
-			quorumValue, quorumErr := j.readActiveMemberCountAtBlock(ctx, eventLog.Address, proposalLog.BlockNumber)
+			quorumValue, quorumErr := j.readActiveMemberCountAtBlock(ctx, eventLog.Address, quorumBlock)
 			if quorumErr != nil {
-				log.Printf("[worker][%s] pool=%s proposal=%s read snapshot quorum failed: %v", j.Name(), group.poolID, proposalIDText, quorumErr)
+				log.Printf("[worker][%s] pool=%s proposal=%s read snapshot quorum failed at block=%d: %v", j.Name(), group.poolID, proposalIDText, quorumBlock, quorumErr)
 				if firstProcessErr == nil {
 					firstProcessErr = quorumErr
 				}
@@ -309,8 +314,6 @@ func (j *GroupInviteNotificationJob) Run(ctx context.Context) error {
 		}
 
 		candidateAddressLower := strings.ToLower(strings.TrimSpace(proposalState.candidate.Hex()))
-		inviterAddress := common.BytesToAddress(proposalLog.Topics[3].Bytes()[12:]).Hex()
-		inviterAddressLower := strings.ToLower(strings.TrimSpace(inviterAddress))
 		if candidateAddressLower == "" {
 			continue
 		}
@@ -326,10 +329,15 @@ func (j *GroupInviteNotificationJob) Run(ctx context.Context) error {
 			proposalIDText,
 			candidateAddressLower,
 		)
-		inviterDisplayName, cached := inviterLabelCache[inviterAddressLower]
-		if !cached {
-			inviterDisplayName = resolveInviteUserLabel(ctx, j.db, inviterAddressLower)
-			inviterLabelCache[inviterAddressLower] = inviterDisplayName
+		if inviterAddressLower != "" {
+			label, cached := inviterLabelCache[inviterAddressLower]
+			if !cached {
+				label = resolveInviteUserLabel(ctx, j.db, inviterAddressLower)
+				inviterLabelCache[inviterAddressLower] = label
+			}
+			if strings.TrimSpace(label) != "" {
+				inviterDisplayName = label
+			}
 		}
 		if insertErr := insertNotification(ctx, j.db, notificationRecord{
 			UserAddress: candidateAddressLower,
@@ -409,18 +417,37 @@ func (j *GroupInviteNotificationJob) findInviteProposedLog(
 	toBlock uint64,
 ) (*types.Log, error) {
 	proposalTopic := common.BigToHash(proposalID)
-	logs, logsErr := j.client.FilterLogs(ctx, ethereum.FilterQuery{
-		FromBlock: big.NewInt(0),
-		ToBlock:   new(big.Int).SetUint64(toBlock),
-		Addresses: []common.Address{poolAddress},
-		Topics: [][]common.Hash{
-			{j.inviteProposedEventSig},
-			{proposalTopic},
-		},
-	})
+	queryLogs := func(fromBlock uint64) ([]types.Log, error) {
+		return j.client.FilterLogs(ctx, ethereum.FilterQuery{
+			FromBlock: new(big.Int).SetUint64(fromBlock),
+			ToBlock:   new(big.Int).SetUint64(toBlock),
+			Addresses: []common.Address{poolAddress},
+			Topics: [][]common.Hash{
+				{j.inviteProposedEventSig},
+				{proposalTopic},
+			},
+		})
+	}
+
+	fromBlock := uint64(0)
+	// Limit lookup window to recent blocks so a single vote event doesn't trigger
+	// a full-chain scan on every worker tick.
+	if toBlock > j.lookbackBlocks {
+		fromBlock = toBlock - j.lookbackBlocks
+	}
+	logs, logsErr := queryLogs(fromBlock)
 	if logsErr != nil {
 		return nil, fmt.Errorf("read invite proposed log: %w", logsErr)
 	}
+
+	// Fallback for long-lived proposals outside the recent window.
+	if len(logs) == 0 && fromBlock > 0 {
+		logs, logsErr = queryLogs(0)
+		if logsErr != nil {
+			return nil, fmt.Errorf("read invite proposed log (fallback): %w", logsErr)
+		}
+	}
+
 	if len(logs) == 0 {
 		return nil, nil
 	}

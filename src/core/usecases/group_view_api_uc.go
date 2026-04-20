@@ -1,15 +1,17 @@
-package handler
+package usecases
 
 import (
 	"context"
 	"fmt"
+	"log"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 
 	"chainora-api/core/constants"
-	"chainora-api/rest/handler/requests"
-	"chainora-api/rest/handler/response"
+	"chainora-api/core/usecases/requests"
+	"chainora-api/core/usecases/response"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/gin-gonic/gin"
@@ -34,7 +36,9 @@ type groupViewResponse struct {
 	Selection      groupViewSelection      `json:"selection"`
 	PeriodMeta     groupViewPeriodMeta     `json:"periodMeta"`
 	PhaseMeta      groupViewPhaseMeta      `json:"phaseMeta"`
+	Runtime        groupViewRuntimeMeta    `json:"runtime"`
 	MemberStates   []groupViewMemberState  `json:"memberStates"`
+	HistoryRows    []groupViewHistoryRow   `json:"historyRows"`
 	Permissions    groupViewPermissions    `json:"permissions"`
 	UserClaimState groupViewUserClaimState `json:"userClaimState"`
 }
@@ -70,6 +74,29 @@ type groupViewPhaseMeta struct {
 	PhaseStatus      string `json:"phaseStatus"`
 	CountdownSeconds int64  `json:"countdownSeconds"`
 	CountdownLabel   string `json:"countdownLabel"`
+}
+
+type groupViewRuntimeMeta struct {
+	StoredPeriodStatus   int   `json:"storedPeriodStatus"`
+	ContributionDeadline int64 `json:"contributionDeadline"`
+	AuctionDeadline      int64 `json:"auctionDeadline"`
+	PayoutDeadline       int64 `json:"payoutDeadline"`
+	ExtendVoteDeadline   int64 `json:"extendVoteDeadline"`
+	AuctionReady         bool  `json:"auctionReady"`
+	AuctionCloseReady    bool  `json:"auctionCloseReady"`
+	FinalizeReady        bool  `json:"finalizeReady"`
+	DefaultPending       bool  `json:"defaultPending"`
+	ExtendVoteExpired    bool  `json:"extendVoteExpired"`
+}
+
+type groupViewHistoryRow struct {
+	Cycle       int    `json:"cycle"`
+	Period      int    `json:"period"`
+	Member      string `json:"member"`
+	Contributed bool   `json:"contributed"`
+	BidAmount   string `json:"bidAmount"`
+	Claimed     bool   `json:"claimed"`
+	ClaimAmount string `json:"claimAmount"`
 }
 
 type groupViewMemberState struct {
@@ -134,18 +161,18 @@ func (h *GroupHandler) GetGroupView(ctx *gin.Context) {
 		return
 	}
 
-	if req.Sync {
-		if refreshed, refreshErr := h.refreshGroupState(ctx.Request.Context(), item); refreshErr == nil {
-			item = refreshed
-		}
-	} else {
-		h.refreshStaleGroupStatesAsync([]groupItem{item})
-	}
-
 	viewerAddress, err := h.authenticatedAddress(ctx)
 	if err != nil {
 		response.WriteError(ctx, err)
 		return
+	}
+
+	if req.Sync {
+		if refreshed, refreshErr := h.refreshGroupState(ctx.Request.Context(), item, viewerAddress); refreshErr == nil {
+			item = refreshed
+		}
+	} else {
+		h.refreshStaleGroupStatesAsync([]groupItem{item})
 	}
 
 	view, err := h.buildGroupView(ctx.Request.Context(), item, viewerAddress, req)
@@ -165,6 +192,28 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 	poolAddress := common.HexToAddress(strings.TrimSpace(item.PoolAddress))
 	viewer := common.HexToAddress(strings.TrimSpace(viewerAddress))
 	nowUnix := time.Now().UTC().Unix()
+	runtimeMeta := groupViewRuntimeMeta{}
+	runtimeSnapshot := runtimeStatusSnapshot{}
+	runtimeAvailable := false
+	runtimeRaw, runtimeErr := h.reader.call(ctx, poolAddress, "runtimeStatus")
+	if runtimeErr == nil {
+		if parsedRuntime, parseErr := parseRuntimeStatusOutput(runtimeRaw); parseErr == nil {
+			runtimeAvailable = true
+			runtimeSnapshot = parsedRuntime
+			runtimeMeta = groupViewRuntimeMeta{
+				StoredPeriodStatus:   parsedRuntime.StoredPeriodStatus,
+				ContributionDeadline: parsedRuntime.ContributionDeadline,
+				AuctionDeadline:      parsedRuntime.AuctionDeadline,
+				PayoutDeadline:       parsedRuntime.PayoutDeadline,
+				ExtendVoteDeadline:   parsedRuntime.ExtendVoteDeadline,
+				AuctionReady:         parsedRuntime.AuctionReady,
+				AuctionCloseReady:    parsedRuntime.AuctionCloseReady,
+				FinalizeReady:        parsedRuntime.FinalizeReady,
+				DefaultPending:       parsedRuntime.DefaultPending,
+				ExtendVoteExpired:    parsedRuntime.ExtendVoteExpired,
+			}
+		}
+	}
 
 	currentCycle, err := parsePositiveInt(item.CurrentCycle, 1)
 	if err != nil {
@@ -173,6 +222,23 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 	currentPeriod, err := parsePositiveInt(item.CurrentPeriod, 1)
 	if err != nil {
 		currentPeriod = 1
+	}
+	if runtimeAvailable {
+		if runtimeSnapshot.CurrentCycle != nil && runtimeSnapshot.CurrentCycle.Sign() > 0 {
+			if runtimeSnapshot.CurrentCycle.IsInt64() {
+				currentCycle = int(runtimeSnapshot.CurrentCycle.Int64())
+			}
+		}
+		if runtimeSnapshot.CurrentPeriod != nil && runtimeSnapshot.CurrentPeriod.Sign() > 0 {
+			if runtimeSnapshot.CurrentPeriod.IsInt64() {
+				currentPeriod = int(runtimeSnapshot.CurrentPeriod.Int64())
+			}
+		}
+		item.CurrentCycle = strconv.Itoa(currentCycle)
+		item.CurrentPeriod = strconv.Itoa(currentPeriod)
+		item.CurrentPeriodStatus = runtimeSnapshot.StoredPeriodStatus
+		item.CycleCompleted = runtimeSnapshot.CycleCompleted
+		item.ExtendVoteOpen = runtimeSnapshot.ExtendVoteOpen
 	}
 	maxPeriod := maxInt(maxInt(item.TargetMembers, item.ActiveMemberCount), 1)
 	if currentPeriod < 1 {
@@ -246,26 +312,27 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 		}
 	}
 
-	activeMembers, activeMembersErr := h.readAddressList(ctx, poolAddress, "activeMembers", "members", "allMembers")
+	activeMembers, activeSource, activeMembersErr := h.readAddressListWithSource(ctx, poolAddress, "activeMembers", "members")
 	if activeMembersErr != nil {
 		activeMembers = []common.Address{}
 	}
-	allMembers, allMembersErr := h.readAddressList(ctx, poolAddress, "allMembers", "members", "activeMembers")
+	if activeSource == "members" && len(activeMembers) > 0 {
+		filteredActiveMembers, filterErr := h.filterActiveMembers(ctx, poolAddress, activeMembers)
+		if filterErr != nil {
+			activeMembers = []common.Address{}
+		} else {
+			activeMembers = filteredActiveMembers
+		}
+	}
+	activeMembers = uniqueAddresses(activeMembers)
+
+	allMembers, _, allMembersErr := h.readAddressListWithSource(ctx, poolAddress, "members")
 	if allMembersErr != nil {
 		allMembers = []common.Address{}
 	}
-	if len(activeMembers) == 0 && len(allMembers) > 0 {
-		activeMembers = append([]common.Address{}, allMembers...)
-	}
+	allMembers = uniqueAddresses(allMembers)
 	if len(allMembers) == 0 && len(activeMembers) > 0 {
 		allMembers = append([]common.Address{}, activeMembers...)
-	}
-	activeMembers = uniqueAddresses(activeMembers)
-	allMembers = uniqueAddresses(allMembers)
-	if len(allMembers) > len(activeMembers) {
-		if filteredActiveMembers, filterErr := h.filterActiveMembers(ctx, poolAddress, allMembers); filterErr == nil && len(filteredActiveMembers) >= len(activeMembers) {
-			activeMembers = filteredActiveMembers
-		}
 	}
 
 	viewerLower := strings.ToLower(strings.TrimSpace(viewerAddress))
@@ -321,6 +388,31 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 	}
 
 	item.GroupStatus = deriveTemporalGroupStatus(item, currentPeriodInfo, nowUnix, allActiveContributedCurrent)
+	if runtimeAvailable && item.Status == 1 {
+		switch runtimeSnapshot.StoredPeriodStatus {
+		case 0:
+			if runtimeSnapshot.DefaultPending {
+				item.GroupStatus = "deadlinepassed"
+			} else if runtimeSnapshot.AuctionReady {
+				item.GroupStatus = "bidding"
+			} else {
+				item.GroupStatus = "funding"
+			}
+		case 1:
+			item.GroupStatus = "bidding"
+		case 2:
+			if runtimeSnapshot.FinalizeReady {
+				item.GroupStatus = "ended_period"
+			} else {
+				item.GroupStatus = "payout"
+			}
+		case 3:
+			item.GroupStatus = "ended_period"
+		}
+		if runtimeSnapshot.CycleCompleted && runtimeSnapshot.ExtendVoteOpen {
+			item.GroupStatus = "voting_extension"
+		}
+	}
 	item.Phase = lifecyclePhaseLabel(item.GroupStatus)
 
 	selectedAllActiveContributed := false
@@ -329,6 +421,9 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 	}
 
 	selectedPhase := phaseFromPeriodStatus(selectedPeriodInfo.Status, selectedPeriodInfo, nowUnix, selectedAllActiveContributed)
+	if runtimeAvailable && selectedCycle == currentCycle && selectedPeriod == currentPeriod {
+		selectedPhase = phaseFromRuntime(runtimeSnapshot, item.GroupStatus)
+	}
 	if strings.TrimSpace(req.Phase) != "" {
 		if normalizedPhase, phaseErr := normalizeViewPhase(req.Phase); phaseErr == nil {
 			selectedPhase = normalizedPhase
@@ -336,6 +431,9 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 	}
 
 	activePhase := deriveCurrentActivePhase(item, currentPeriodInfo, nowUnix, allActiveContributedCurrent)
+	if runtimeAvailable {
+		activePhase = phaseFromRuntime(runtimeSnapshot, item.GroupStatus)
+	}
 	isHistoricalView, isFutureView, isCurrentActivePhase := compareSelection(
 		item,
 		selectedPeriod,
@@ -355,11 +453,17 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 	countdownSeconds := int64(0)
 	if phaseStatus == "active" {
 		phaseEnd := phaseEndAt(selectedPhase, selectedPeriodInfo)
+		if runtimeAvailable && isCurrentActivePhase {
+			phaseEnd = phaseEndAtWithRuntime(selectedPhase, item.GroupStatus, selectedPeriodInfo, runtimeSnapshot)
+		}
 		if phaseEnd > nowUnix {
 			countdownSeconds = phaseEnd - nowUnix
 		}
 	} else if phaseStatus == "upcoming" {
 		phaseStart := phaseStartAt(selectedPhase, selectedPeriodInfo)
+		if runtimeAvailable {
+			phaseStart = phaseStartAtWithRuntime(selectedPhase, selectedPeriodInfo, runtimeSnapshot)
+		}
 		if phaseStart > nowUnix {
 			countdownSeconds = phaseStart - nowUnix
 		}
@@ -383,6 +487,26 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 			return groupViewResponse{}, err
 		}
 	}
+	historyContributed := hasContributed
+	if len(historyContributed) == 0 && len(activeMembers) > 0 {
+		historyContributed, _ = h.readHasContributedMap(ctx, poolAddress, selectedCycleBig, selectedPeriodBig, activeMembers)
+	}
+	if persistErr := h.upsertGroupPeriodMemberHistory(
+		ctx,
+		item.PoolID,
+		selectedCycle,
+		selectedPeriod,
+		activeMembers,
+		historyContributed,
+		selectedPeriodInfo,
+	); persistErr != nil {
+		log.Printf("[groups] persist history failed pool=%s cycle=%d period=%d err=%v", item.PoolID, selectedCycle, selectedPeriod, persistErr)
+	}
+	historyRows, historyErr := h.queryGroupPeriodMemberHistory(ctx, item.PoolID, selectedCycle)
+	if historyErr != nil {
+		log.Printf("[groups] query history failed pool=%s cycle=%d err=%v", item.PoolID, selectedCycle, historyErr)
+		historyRows = []groupViewHistoryRow{}
+	}
 
 	claimableYield, err := h.readBigIntByAddress(ctx, poolAddress, "claimableYield", viewer)
 	if err != nil {
@@ -395,6 +519,7 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 
 	memberStates := buildViewMemberStates(
 		selectedPhase,
+		selectedPeriod,
 		selectedPeriodInfo,
 		activeMembers,
 		hasContributed,
@@ -414,7 +539,7 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 	permissions := buildPhasePermissions(phasePermissionInput{
 		selectedPhase:          selectedPhase,
 		selectedPeriod:         selectedPeriod,
-		currentPeriod:          currentPeriod,
+		maxPeriod:              maxPeriod,
 		isHistoricalView:       isHistoricalView,
 		isFutureView:           isFutureView,
 		isCurrentActivePhase:   isCurrentActivePhase,
@@ -423,6 +548,8 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 		viewerIsActiveMember:   viewerIsActiveMember,
 		groupStatus:            item.GroupStatus,
 		periodInfo:             selectedPeriodInfo,
+		runtime:                runtimeSnapshot,
+		runtimeAvailable:       runtimeAvailable,
 		hasContributedByViewer: hasContributed[viewerLower],
 		hasReceivedByViewer:    hasReceived[viewerLower],
 		claimableYield:         claimableYield,
@@ -461,12 +588,23 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 			CountdownSeconds: countdownSeconds,
 			CountdownLabel:   formatCountdownLabel(phaseStatus, countdownSeconds),
 		},
+		Runtime:      runtimeMeta,
 		MemberStates: memberStates,
+		HistoryRows:  historyRows,
 		Permissions:  permissions,
 		UserClaimState: groupViewUserClaimState{
 			ClaimableYield:         claimableYield.String(),
 			ClaimableArchiveRefund: claimableArchiveRefund.String(),
 		},
+	}
+	if runtimeAvailable && selectedCycle == currentCycle && selectedPeriod == currentPeriod {
+		view.PeriodMeta.ContributionDeadline = runtimeSnapshot.ContributionDeadline
+		if runtimeSnapshot.AuctionDeadline > 0 {
+			view.PeriodMeta.AuctionDeadline = runtimeSnapshot.AuctionDeadline
+		}
+		if runtimeSnapshot.PayoutDeadline > 0 {
+			view.PeriodMeta.PeriodEndAt = runtimeSnapshot.PayoutDeadline
+		}
 	}
 
 	return view, nil
@@ -527,7 +665,11 @@ func (h *GroupHandler) readPeriodSnapshot(
 	}, nil
 }
 
-func (h *GroupHandler) readAddressList(ctx context.Context, poolAddress common.Address, methods ...string) ([]common.Address, error) {
+func (h *GroupHandler) readAddressListWithSource(
+	ctx context.Context,
+	poolAddress common.Address,
+	methods ...string,
+) ([]common.Address, string, error) {
 	var lastErr error
 	for _, method := range methods {
 		name := strings.TrimSpace(method)
@@ -541,12 +683,12 @@ func (h *GroupHandler) readAddressList(ctx context.Context, poolAddress common.A
 			continue
 		}
 		if len(raw) == 0 {
-			return []common.Address{}, nil
+			return []common.Address{}, name, nil
 		}
 
 		addresses, ok := raw[0].([]common.Address)
 		if ok {
-			return uniqueAddresses(addresses), nil
+			return uniqueAddresses(addresses), name, nil
 		}
 
 		anyValues, ok := raw[0].([]any)
@@ -559,13 +701,18 @@ func (h *GroupHandler) readAddressList(ctx context.Context, poolAddress common.A
 		for _, value := range anyValues {
 			parsed = append(parsed, toAddress(value))
 		}
-		return uniqueAddresses(parsed), nil
+		return uniqueAddresses(parsed), name, nil
 	}
 
 	if lastErr != nil {
-		return nil, lastErr
+		return nil, "", lastErr
 	}
-	return []common.Address{}, nil
+	return []common.Address{}, "", nil
+}
+
+func (h *GroupHandler) readAddressList(ctx context.Context, poolAddress common.Address, methods ...string) ([]common.Address, error) {
+	addresses, _, err := h.readAddressListWithSource(ctx, poolAddress, methods...)
+	return addresses, err
 }
 
 func (h *GroupHandler) readIsMember(
@@ -677,8 +824,256 @@ func (h *GroupHandler) readBigIntByAddress(
 	return value, nil
 }
 
+func phaseFromRuntime(runtime runtimeStatusSnapshot, groupStatus string) string {
+	if strings.EqualFold(groupStatus, "voting_extension") || strings.EqualFold(groupStatus, "archived") {
+		return phaseEnding
+	}
+
+	switch runtime.StoredPeriodStatus {
+	case 0:
+		if runtime.DefaultPending {
+			return phaseEnding
+		}
+		if runtime.AuctionReady {
+			return phaseBidding
+		}
+		return phaseFunding
+	case 1:
+		return phaseBidding
+	case 2:
+		if runtime.FinalizeReady {
+			return phaseEnding
+		}
+		return phasePayout
+	case 3:
+		return phaseEnding
+	default:
+		return phaseFunding
+	}
+}
+
+func phaseStartAtWithRuntime(phase string, period periodViewSnapshot, runtime runtimeStatusSnapshot) int64 {
+	switch phase {
+	case phaseFunding:
+		return period.StartAt
+	case phaseBidding:
+		if runtime.ContributionDeadline > 0 {
+			return runtime.ContributionDeadline
+		}
+		return period.ContributionDeadline
+	case phasePayout:
+		if runtime.AuctionDeadline > 0 {
+			return runtime.AuctionDeadline
+		}
+		return period.AuctionDeadline
+	case phaseEnding:
+		if runtime.PayoutDeadline > 0 {
+			return runtime.PayoutDeadline
+		}
+		return period.PeriodEndAt
+	default:
+		return 0
+	}
+}
+
+func phaseEndAtWithRuntime(phase string, groupStatus string, period periodViewSnapshot, runtime runtimeStatusSnapshot) int64 {
+	switch phase {
+	case phaseFunding:
+		if runtime.ContributionDeadline > 0 {
+			return runtime.ContributionDeadline
+		}
+		return period.ContributionDeadline
+	case phaseBidding:
+		if runtime.AuctionDeadline > 0 {
+			return runtime.AuctionDeadline
+		}
+		return period.AuctionDeadline
+	case phasePayout:
+		if runtime.PayoutDeadline > 0 {
+			return runtime.PayoutDeadline
+		}
+		return period.PeriodEndAt
+	case phaseEnding:
+		if strings.EqualFold(groupStatus, "voting_extension") && runtime.ExtendVoteDeadline > 0 {
+			return runtime.ExtendVoteDeadline
+		}
+		if runtime.PayoutDeadline > 0 {
+			return runtime.PayoutDeadline
+		}
+		return period.PeriodEndAt
+	default:
+		return 0
+	}
+}
+
+func (h *GroupHandler) upsertGroupPeriodMemberHistory(
+	ctx context.Context,
+	poolID string,
+	cycle int,
+	period int,
+	activeMembers []common.Address,
+	hasContributed map[string]bool,
+	periodInfo periodViewSnapshot,
+) error {
+	if h == nil || h.db == nil {
+		return nil
+	}
+
+	trimmedPoolID := strings.TrimSpace(poolID)
+	if trimmedPoolID == "" || cycle <= 0 || period <= 0 {
+		return nil
+	}
+
+	for _, member := range uniqueAddresses(activeMembers) {
+		memberAddress := strings.ToLower(strings.TrimSpace(member.Hex()))
+		if memberAddress == "" {
+			continue
+		}
+
+		bidAmount := "0"
+		if strings.EqualFold(periodInfo.BestBidder, memberAddress) {
+			bidAmount = strings.TrimSpace(periodInfo.BestDiscount)
+			if bidAmount == "" {
+				bidAmount = "0"
+			}
+		}
+
+		claimed := periodInfo.PayoutClaimed && strings.EqualFold(periodInfo.Recipient, memberAddress)
+		claimAmount := "0"
+		if claimed {
+			claimAmount = strings.TrimSpace(periodInfo.PayoutAmount)
+			if claimAmount == "" {
+				claimAmount = "0"
+			}
+		}
+
+		_, err := h.db.ExecContext(
+			ctx,
+			`INSERT INTO group_period_member_history (
+			    pool_id,
+			    cycle_id,
+			    period_id,
+			    member_address,
+			    contributed,
+			    bid_amount,
+			    claimed,
+			    claim_amount,
+			    updated_at
+			  ) VALUES (
+			    $1::numeric,
+			    $2::numeric,
+			    $3::numeric,
+			    $4,
+			    $5,
+			    $6::numeric,
+			    $7,
+			    $8::numeric,
+			    NOW()
+			  )
+			  ON CONFLICT (pool_id, cycle_id, period_id, member_address)
+			  DO UPDATE SET
+			    contributed = group_period_member_history.contributed OR EXCLUDED.contributed,
+			    bid_amount = GREATEST(group_period_member_history.bid_amount, EXCLUDED.bid_amount),
+			    claimed = group_period_member_history.claimed OR EXCLUDED.claimed,
+			    claim_amount = GREATEST(group_period_member_history.claim_amount, EXCLUDED.claim_amount),
+			    updated_at = NOW()`,
+			trimmedPoolID,
+			cycle,
+			period,
+			memberAddress,
+			hasContributed[memberAddress],
+			bidAmount,
+			claimed,
+			claimAmount,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (h *GroupHandler) queryGroupPeriodMemberHistory(
+	ctx context.Context,
+	poolID string,
+	cycle int,
+) ([]groupViewHistoryRow, error) {
+	if h == nil || h.db == nil {
+		return []groupViewHistoryRow{}, nil
+	}
+
+	trimmedPoolID := strings.TrimSpace(poolID)
+	if trimmedPoolID == "" || cycle <= 0 {
+		return []groupViewHistoryRow{}, nil
+	}
+
+	rows, err := h.db.QueryContext(
+		ctx,
+		`SELECT cycle_id::text,
+		        period_id::text,
+		        member_address,
+		        contributed,
+		        bid_amount::text,
+		        claimed,
+		        claim_amount::text
+		 FROM group_period_member_history
+		 WHERE pool_id = $1::numeric
+		   AND cycle_id = $2::numeric
+		 ORDER BY period_id ASC, member_address ASC`,
+		trimmedPoolID,
+		cycle,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]groupViewHistoryRow, 0)
+	for rows.Next() {
+		var cycleRaw string
+		var periodRaw string
+		var row groupViewHistoryRow
+		if scanErr := rows.Scan(
+			&cycleRaw,
+			&periodRaw,
+			&row.Member,
+			&row.Contributed,
+			&row.BidAmount,
+			&row.Claimed,
+			&row.ClaimAmount,
+		); scanErr != nil {
+			return nil, scanErr
+		}
+		parsedCycle, cycleErr := parsePositiveInt(cycleRaw, cycle)
+		if cycleErr != nil {
+			parsedCycle = cycle
+		}
+		parsedPeriod, periodErr := parsePositiveInt(periodRaw, 1)
+		if periodErr != nil {
+			parsedPeriod = 1
+		}
+		row.Cycle = parsedCycle
+		row.Period = parsedPeriod
+		row.Member = strings.ToLower(strings.TrimSpace(row.Member))
+		if strings.TrimSpace(row.BidAmount) == "" {
+			row.BidAmount = "0"
+		}
+		if strings.TrimSpace(row.ClaimAmount) == "" {
+			row.ClaimAmount = "0"
+		}
+		out = append(out, row)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, rowsErr
+	}
+
+	return out, nil
+}
+
 func buildViewMemberStates(
 	selectedPhase string,
+	selectedPeriod int,
 	period periodViewSnapshot,
 	activeMembers []common.Address,
 	hasContributed map[string]bool,
@@ -733,9 +1128,12 @@ func buildViewMemberStates(
 			if period.Status == 3 {
 				state = "completed"
 				badge = "Completed"
+			} else if strings.EqualFold(period.Recipient, memberHex) {
+				state = "recipient_pending"
+				badge = fmt.Sprintf("Claimer period %d", maxInt(selectedPeriod, 1))
 			} else {
-				state = "pending_finalize"
-				badge = "Pending Finalize"
+				state = "member"
+				badge = ""
 			}
 		}
 
@@ -754,7 +1152,7 @@ func buildViewMemberStates(
 type phasePermissionInput struct {
 	selectedPhase          string
 	selectedPeriod         int
-	currentPeriod          int
+	maxPeriod              int
 	isHistoricalView       bool
 	isFutureView           bool
 	isCurrentActivePhase   bool
@@ -763,6 +1161,8 @@ type phasePermissionInput struct {
 	viewerIsActiveMember   bool
 	groupStatus            string
 	periodInfo             periodViewSnapshot
+	runtime                runtimeStatusSnapshot
+	runtimeAvailable       bool
 	hasContributedByViewer bool
 	hasReceivedByViewer    bool
 	claimableYield         *big.Int
@@ -787,10 +1187,27 @@ func buildPhasePermissions(input phasePermissionInput) groupViewPermissions {
 	isDeadlinePassed := strings.EqualFold(strings.TrimSpace(input.groupStatus), "deadlinepassed")
 	viewerIsRecipient := strings.EqualFold(strings.TrimSpace(input.periodInfo.Recipient), strings.TrimSpace(input.viewerAddress))
 	canActInPhase := input.isCurrentActivePhase && !input.isHistoricalView && !input.isFutureView
+	lastPeriodNoBid := input.selectedPeriod >= maxInt(input.maxPeriod, 1)
 
 	canContributeNow := input.periodInfo.ContributionDeadline <= 0 || input.nowUnix < input.periodInfo.ContributionDeadline
 	canBidNow := (input.periodInfo.ContributionDeadline <= 0 || input.nowUnix >= input.periodInfo.ContributionDeadline) &&
 		(input.periodInfo.AuctionDeadline <= 0 || input.nowUnix < input.periodInfo.AuctionDeadline)
+	canCloseAuction := input.periodInfo.AuctionDeadline > 0 && input.nowUnix >= input.periodInfo.AuctionDeadline
+	canFinalize := input.periodInfo.Status == 2 && input.periodInfo.PeriodEndAt > 0 && input.nowUnix >= input.periodInfo.PeriodEndAt
+	canVoteExtend := isVotingExtension
+
+	if input.runtimeAvailable {
+		canContributeNow = input.runtime.StoredPeriodStatus == 0 &&
+			!input.runtime.DefaultPending &&
+			(input.runtime.ContributionDeadline <= 0 || input.nowUnix < input.runtime.ContributionDeadline)
+		canBidNow = !lastPeriodNoBid &&
+			!input.runtime.DefaultPending &&
+			(input.runtime.StoredPeriodStatus == 1 || (input.runtime.StoredPeriodStatus == 0 && input.runtime.AuctionReady)) &&
+			!input.runtime.AuctionCloseReady
+		canCloseAuction = input.runtime.AuctionCloseReady
+		canFinalize = input.runtime.FinalizeReady
+		canVoteExtend = isVotingExtension && !input.runtime.ExtendVoteExpired
+	}
 
 	if canActInPhase &&
 		input.viewerIsActiveMember &&
@@ -804,23 +1221,29 @@ func buildPhasePermissions(input phasePermissionInput) groupViewPermissions {
 		input.viewerIsActiveMember &&
 		input.selectedPhase == phaseBidding &&
 		!input.hasReceivedByViewer &&
+		!lastPeriodNoBid &&
 		canBidNow {
 		permissions.CanBid = true
 	}
 	if canActInPhase &&
 		input.viewerIsActiveMember &&
 		input.selectedPhase == phaseBidding &&
-		input.periodInfo.AuctionDeadline > 0 &&
-		input.nowUnix >= input.periodInfo.AuctionDeadline {
+		canCloseAuction {
 		permissions.CanCloseAuction = true
 	}
-	if canActInPhase && input.viewerIsActiveMember && input.selectedPhase == phasePayout && viewerIsRecipient && !input.periodInfo.PayoutClaimed {
-		permissions.CanClaim = true
+	if canActInPhase &&
+		input.viewerIsActiveMember &&
+		input.selectedPhase == phasePayout &&
+		viewerIsRecipient &&
+		!input.periodInfo.PayoutClaimed {
+		if !input.runtimeAvailable || input.runtime.StoredPeriodStatus == 2 || input.runtime.AuctionCloseReady {
+			permissions.CanClaim = true
+		}
 	}
-	if canActInPhase && input.viewerIsActiveMember && input.selectedPhase == phaseEnding && input.periodInfo.Status == 2 && input.periodInfo.PeriodEndAt > 0 && input.nowUnix >= input.periodInfo.PeriodEndAt {
+	if canActInPhase && input.viewerIsActiveMember && input.selectedPhase == phaseEnding && canFinalize {
 		permissions.CanFinalize = true
 	}
-	if canActInPhase && input.viewerIsActiveMember && input.selectedPhase == phaseEnding && isVotingExtension {
+	if canActInPhase && input.viewerIsActiveMember && input.selectedPhase == phaseEnding && canVoteExtend {
 		permissions.CanVoteExtend = true
 	}
 	if isArchived && input.viewerIsMember && input.claimableYield != nil && input.claimableYield.Sign() > 0 {
@@ -831,15 +1254,33 @@ func buildPhasePermissions(input phasePermissionInput) groupViewPermissions {
 		switch input.selectedPhase {
 		case phaseFunding:
 			if !permissions.CanContribute {
-				if isDeadlinePassed || (input.periodInfo.ContributionDeadline > 0 && input.nowUnix >= input.periodInfo.ContributionDeadline) {
+				if input.runtimeAvailable && input.runtime.DefaultPending {
+					permissions.DisabledReason = "Funding is blocked because at least one active member missed contribution."
+				} else if input.hasContributedByViewer {
+					permissions.DisabledReason = "Contribution already submitted for this period."
+				} else if input.runtimeAvailable && input.runtime.ContributionDeadline > 0 && input.nowUnix >= input.runtime.ContributionDeadline {
+					permissions.DisabledReason = "Contribution deadline has passed for this period."
+				} else if !input.runtimeAvailable && input.periodInfo.ContributionDeadline > 0 && input.nowUnix >= input.periodInfo.ContributionDeadline {
 					permissions.DisabledReason = "Contribution deadline has passed for this period."
 				} else {
-					permissions.DisabledReason = "Contribution already submitted or phase is not active."
+					permissions.DisabledReason = "Contribution is unavailable for your wallet in this phase."
 				}
 			}
 		case phaseBidding:
-			if !permissions.CanBid && !permissions.CanCloseAuction {
-				if input.periodInfo.ContributionDeadline > 0 && input.nowUnix < input.periodInfo.ContributionDeadline {
+			if lastPeriodNoBid {
+				permissions.DisabledReason = "Final period has no bidding. Remaining member receives payout directly."
+			} else if !permissions.CanBid && !permissions.CanCloseAuction {
+				if input.runtimeAvailable {
+					if input.runtime.DefaultPending {
+						permissions.DisabledReason = "Bidding is blocked because some active members missed contribution."
+					} else if input.runtime.StoredPeriodStatus == 0 && !input.runtime.AuctionReady {
+						permissions.DisabledReason = "Bidding opens after all active members contribute and collecting window closes."
+					} else if input.runtime.AuctionCloseReady {
+						permissions.DisabledReason = "Auction deadline reached. Trigger runtime sync to open payout."
+					} else {
+						permissions.DisabledReason = "Bidding is unavailable for your wallet in this phase."
+					}
+				} else if input.periodInfo.ContributionDeadline > 0 && input.nowUnix < input.periodInfo.ContributionDeadline {
 					permissions.DisabledReason = "Bidding opens after contribution deadline."
 				} else if input.periodInfo.AuctionDeadline > 0 && input.nowUnix >= input.periodInfo.AuctionDeadline {
 					permissions.DisabledReason = "Auction deadline reached. Close auction to continue."
@@ -847,21 +1288,35 @@ func buildPhasePermissions(input phasePermissionInput) groupViewPermissions {
 					permissions.DisabledReason = "Bidding is unavailable for your wallet in this phase."
 				}
 			} else if permissions.CanBid && !permissions.CanCloseAuction {
-				permissions.DisabledReason = "Close auction is available after auction deadline."
+				permissions.DisabledReason = "Sync to payout is available after auction deadline."
 			}
 		case phasePayout:
 			if !permissions.CanClaim {
-				permissions.DisabledReason = "Only the selected recipient can claim payout while payout is open."
+				if input.periodInfo.PayoutClaimed {
+					permissions.DisabledReason = "Payout already claimed for this period."
+				} else if !viewerIsRecipient {
+					permissions.DisabledReason = "Only the selected recipient can claim payout while payout is open."
+				} else if input.runtimeAvailable && input.runtime.FinalizeReady {
+					permissions.DisabledReason = "Payout window ended. Trigger ending to continue the lifecycle."
+				} else {
+					permissions.DisabledReason = "Claim is unavailable in current runtime state."
+				}
 			}
 		case phaseEnding:
 			if isDeadlinePassed {
 				permissions.DisabledReason = "Contribution deadline passed before all active members contributed."
 			} else if isVotingExtension {
-				if !permissions.CanVoteExtend {
+				if input.runtimeAvailable && input.runtime.ExtendVoteExpired {
+					permissions.DisabledReason = "Extension vote window expired. Active members can archive."
+				} else if !permissions.CanVoteExtend {
 					permissions.DisabledReason = "Extension voting is unavailable for this selection."
 				}
 			} else if !permissions.CanFinalize {
-				permissions.DisabledReason = "Finalize is available after period end while payout is open."
+				if input.runtimeAvailable && input.runtime.StoredPeriodStatus == 2 && !input.runtime.FinalizeReady {
+					permissions.DisabledReason = "Finalize is available when payout deadline is reached."
+				} else {
+					permissions.DisabledReason = "Finalize is available after payout deadline."
+				}
 			}
 		}
 	}

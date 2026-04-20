@@ -1,19 +1,19 @@
-package handler
+package usecases
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"chainora-api/core/constants"
 	entityrequest "chainora-api/core/entities/request"
 	entityresponse "chainora-api/core/entities/response"
-	"chainora-api/core/usecases"
-	"chainora-api/rest/controllers"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
@@ -28,7 +28,7 @@ type TokenIssuer interface {
 }
 
 type initSessionUsecase struct {
-	auth usecases.AuthUsecase
+	auth AuthUsecase
 }
 
 func (u *initSessionUsecase) Trigger(_ *gin.Context, _ entityrequest.InitSessionRequest) (entityresponse.InitSessionResponse, error) {
@@ -41,8 +41,8 @@ func (u *initSessionUsecase) Trigger(_ *gin.Context, _ entityrequest.InitSession
 }
 
 type waitForLoginUsecase struct {
-	auth     usecases.AuthUsecase
-	hub      *controllers.WSHub
+	auth     AuthUsecase
+	hub      *WSHub
 	upgrader websocket.Upgrader
 	validate *validator.Validate
 }
@@ -77,15 +77,15 @@ func (u *waitForLoginUsecase) Trigger(ctx *gin.Context, req entityrequest.WaitFo
 }
 
 type verifySignatureUsecase struct {
-	auth     usecases.AuthUsecase
+	auth     AuthUsecase
 	issuer   TokenIssuer
-	hub      *controllers.WSHub
+	hub      *WSHub
 	validate *validator.Validate
 }
 
 type progressLoginUsecase struct {
-	auth     usecases.AuthUsecase
-	hub      *controllers.WSHub
+	auth     AuthUsecase
+	hub      *WSHub
 	validate *validator.Validate
 }
 
@@ -100,7 +100,7 @@ type meUsecase struct {
 }
 
 type getProfileUsecase struct {
-	auth     usecases.AuthUsecase
+	auth     AuthUsecase
 	issuer   TokenIssuer
 	validate *validator.Validate
 	resolver interface {
@@ -109,16 +109,17 @@ type getProfileUsecase struct {
 }
 
 type listProfilesUsecase struct {
-	auth     usecases.AuthUsecase
+	auth     AuthUsecase
 	issuer   TokenIssuer
 	validate *validator.Validate
+	db       *sql.DB
 	resolver interface {
 		ResolvePrimaryUsername(ctx context.Context, address string) (string, error)
 	}
 }
 
 type updateProfileUsecase struct {
-	auth     usecases.AuthUsecase
+	auth     AuthUsecase
 	issuer   TokenIssuer
 	validate *validator.Validate
 }
@@ -251,6 +252,7 @@ func (u *getProfileUsecase) Trigger(ctx *gin.Context, req entityrequest.MeReques
 		Address:                       user.Address,
 		Username:                      username,
 		AvatarURL:                     strings.TrimSpace(user.AvatarURL),
+		ReputationScore:               strconv.FormatInt(user.ReputationScore, 10),
 		UsernameCount:                 user.UsernameCount,
 		PrimarySelectionSponsoredUsed: user.PrimarySelectionSponsoredUsed,
 		TCNR:                          user.TCNR,
@@ -333,15 +335,18 @@ func (u *listProfilesUsecase) buildProfile(
 	address string,
 ) (entityresponse.BasicProfileResponse, error) {
 	profile := entityresponse.BasicProfileResponse{
-		Address:   strings.ToLower(strings.TrimSpace(address)),
-		Username:  "",
-		AvatarURL: "",
+		Address:           strings.ToLower(strings.TrimSpace(address)),
+		Username:          "",
+		AvatarURL:         "",
+		ReputationScore:   "0",
+		JoinedGroupsCount: 0,
 	}
 
 	user, err := u.auth.GetUserProfile(profile.Address)
 	if err == nil {
 		profile.Username = normalizeProfileUsername(user.Username)
 		profile.AvatarURL = strings.TrimSpace(user.AvatarURL)
+		profile.ReputationScore = strconv.FormatInt(user.ReputationScore, 10)
 	} else if !errors.Is(err, constants.ErrUserNotFound) {
 		return entityresponse.BasicProfileResponse{}, err
 	}
@@ -350,6 +355,7 @@ func (u *listProfilesUsecase) buildProfile(
 	if resolveErr == nil && normalizeProfileUsername(resolvedUsername) != "" {
 		profile.Username = normalizeProfileUsername(resolvedUsername)
 	}
+	profile.JoinedGroupsCount = u.lookupJoinedGroupsCount(profile.Address)
 
 	return profile, nil
 }
@@ -373,6 +379,7 @@ func (u *updateProfileUsecase) Trigger(_ *gin.Context, accessToken string, req e
 		Address:                       user.Address,
 		Username:                      normalizeProfileUsername(user.Username),
 		AvatarURL:                     strings.TrimSpace(user.AvatarURL),
+		ReputationScore:               strconv.FormatInt(user.ReputationScore, 10),
 		UsernameCount:                 user.UsernameCount,
 		PrimarySelectionSponsoredUsed: user.PrimarySelectionSponsoredUsed,
 		TCNR:                          user.TCNR,
@@ -404,6 +411,31 @@ func (u *listProfilesUsecase) resolveUsername(ctx context.Context, address strin
 	}
 
 	return strings.TrimSpace(username), nil
+}
+
+func (u *listProfilesUsecase) lookupJoinedGroupsCount(address string) int {
+	if u == nil || u.db == nil {
+		return 0
+	}
+
+	normalized := strings.ToLower(strings.TrimSpace(address))
+	if normalized == "" {
+		return 0
+	}
+
+	var count int
+	if err := u.db.QueryRow(
+		`SELECT COUNT(DISTINCT pool_id) FROM (
+		    SELECT pool_id FROM group_period_member_history WHERE LOWER(member_address) = $1
+		    UNION
+		    SELECT pool_id FROM groups WHERE LOWER(creator_address) = $1
+		  ) AS joined`,
+		normalized,
+	).Scan(&count); err != nil {
+		return 0
+	}
+
+	return count
 }
 
 func normalizeAddressList(rawAddresses []string) []string {
