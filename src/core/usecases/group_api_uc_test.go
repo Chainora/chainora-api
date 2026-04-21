@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -315,5 +316,94 @@ func TestCreateGroupRejectsTargetMembersBelowThree(t *testing.T) {
 	}
 	if !strings.Contains(strings.ToLower(recorder.Body.String()), "targetmembers") {
 		t.Fatalf("expected targetMembers validation error, got %s", recorder.Body.String())
+	}
+}
+
+func TestParseRuntimeStatusOutputReadsAllActiveContributed(t *testing.T) {
+	t.Parallel()
+
+	output := struct {
+		PoolStatus           uint8
+		CurrentCycle         *big.Int
+		CurrentPeriod        *big.Int
+		StoredPeriodStatus   uint8
+		StartAt              uint64
+		ContributionDeadline uint64
+		AuctionDeadline      uint64
+		PayoutDeadline       uint64
+		CycleCompleted       bool
+		ExtendVoteOpen       bool
+		ExtendVoteDeadline   uint64
+		AllActiveContributed bool
+		DefaultPending       bool
+		AuctionReady         bool
+		AuctionCloseReady    bool
+		FinalizeReady        bool
+		ExtendVoteExpired    bool
+	}{
+		PoolStatus:           1,
+		CurrentCycle:         big.NewInt(3),
+		CurrentPeriod:        big.NewInt(2),
+		StoredPeriodStatus:   0,
+		ContributionDeadline: 1_700_000_000,
+		AllActiveContributed: true,
+	}
+
+	snapshot, err := parseRuntimeStatusOutput([]any{output})
+	if err != nil {
+		t.Fatalf("parseRuntimeStatusOutput() error = %v", err)
+	}
+
+	if !snapshot.AllActiveContributed {
+		t.Fatalf("expected AllActiveContributed=true")
+	}
+	if snapshot.CurrentCycle.String() != "3" || snapshot.CurrentPeriod.String() != "2" {
+		t.Fatalf("unexpected cycle/period parsed: cycle=%s period=%s", snapshot.CurrentCycle.String(), snapshot.CurrentPeriod.String())
+	}
+}
+
+func TestParseRuntimeStatusWithRetryRecoversOnSecondAttempt(t *testing.T) {
+	t.Parallel()
+
+	attempts := 0
+	snapshot, err := parseRuntimeStatusWithRetry(func() ([]any, error) {
+		attempts += 1
+		if attempts == 1 {
+			return nil, errors.New("temporary rpc error")
+		}
+		return []any{struct {
+			PoolStatus           uint8
+			CurrentCycle         *big.Int
+			CurrentPeriod        *big.Int
+			StoredPeriodStatus   uint8
+			StartAt              uint64
+			ContributionDeadline uint64
+			AuctionDeadline      uint64
+			PayoutDeadline       uint64
+			CycleCompleted       bool
+			ExtendVoteOpen       bool
+			ExtendVoteDeadline   uint64
+			AllActiveContributed bool
+			DefaultPending       bool
+			AuctionReady         bool
+			AuctionCloseReady    bool
+			FinalizeReady        bool
+			ExtendVoteExpired    bool
+		}{
+			PoolStatus:           1,
+			CurrentCycle:         big.NewInt(1),
+			CurrentPeriod:        big.NewInt(1),
+			StoredPeriodStatus:   0,
+			AllActiveContributed: true,
+		}}, nil
+	}, 1)
+	if err != nil {
+		t.Fatalf("parseRuntimeStatusWithRetry() error = %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("expected 2 attempts, got %d", attempts)
+	}
+	if !snapshot.AllActiveContributed {
+		t.Fatalf("expected AllActiveContributed=true after retry")
 	}
 }

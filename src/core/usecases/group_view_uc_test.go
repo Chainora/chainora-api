@@ -205,3 +205,140 @@ func TestBuildPhasePermissions(t *testing.T) {
 		t.Fatalf("expected DisabledReason for deadlinepassed state")
 	}
 }
+
+func TestBuildPhasePermissions_RuntimeCollectingExpiredEnablesSyncRuntime(t *testing.T) {
+	t.Parallel()
+
+	nowUnix := int64(1_710_000_900)
+	permissions := buildPhasePermissions(phasePermissionInput{
+		selectedPhase:        phaseBidding,
+		selectedPeriod:       1,
+		maxPeriod:            3,
+		isCurrentActivePhase: true,
+		viewerAddress:        "0x1111111111111111111111111111111111111111",
+		viewerIsMember:       true,
+		viewerIsActiveMember: true,
+		groupStatus:          "bidding",
+		runtimeAvailable:     true,
+		runtime: runtimeStatusSnapshot{
+			StoredPeriodStatus:   0,
+			ContributionDeadline: nowUnix - 60,
+			AllActiveContributed: true,
+			AuctionReady:         false,
+			AuctionCloseReady:    false,
+			DefaultPending:       false,
+		},
+		nowUnix:        nowUnix,
+		claimableYield: big.NewInt(0),
+	})
+
+	if permissions.CanBid {
+		t.Fatalf("expected CanBid=false when auction window is already elapsed")
+	}
+	if !permissions.CanCloseAuction {
+		t.Fatalf("expected CanCloseAuction=true to allow syncRuntime opening payout")
+	}
+}
+
+func TestPhaseFromRuntime(t *testing.T) {
+	t.Parallel()
+
+	nowUnix := int64(1_710_000_120)
+
+	tests := []struct {
+		name        string
+		runtime     runtimeStatusSnapshot
+		groupStatus string
+		want        string
+	}{
+		{
+			name: "collecting before deadline remains funding",
+			runtime: runtimeStatusSnapshot{
+				StoredPeriodStatus:   0,
+				ContributionDeadline: nowUnix + 30,
+				AllActiveContributed: true,
+			},
+			groupStatus: "funding",
+			want:        phaseFunding,
+		},
+		{
+			name: "collecting deadline reached and all contributed goes bidding",
+			runtime: runtimeStatusSnapshot{
+				StoredPeriodStatus:   0,
+				ContributionDeadline: nowUnix - 1,
+				AllActiveContributed: true,
+			},
+			groupStatus: "funding",
+			want:        phaseBidding,
+		},
+		{
+			name: "collecting deadline reached and missing contribution goes ending",
+			runtime: runtimeStatusSnapshot{
+				StoredPeriodStatus:   0,
+				ContributionDeadline: nowUnix - 1,
+				AllActiveContributed: false,
+			},
+			groupStatus: "funding",
+			want:        phaseEnding,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := phaseFromRuntime(tt.runtime, tt.groupStatus, nowUnix)
+			if got != tt.want {
+				t.Fatalf("phaseFromRuntime() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPhaseEndAtWithRuntimeBiddingProjectionWhenAuctionDeadlineMissing(t *testing.T) {
+	t.Parallel()
+
+	nowUnix := int64(1_710_000_500)
+	period := periodViewSnapshot{
+		ContributionDeadline: nowUnix - 10,
+		AuctionDeadline:      0,
+	}
+	runtime := runtimeStatusSnapshot{
+		StoredPeriodStatus:   0,
+		ContributionDeadline: nowUnix - 10,
+		AllActiveContributed: true,
+	}
+	timing := phaseTimingWindows{
+		AuctionWindow: 120,
+	}
+
+	got := phaseEndAtWithRuntime(phaseBidding, "bidding", period, runtime, timing, nowUnix)
+	want := runtime.ContributionDeadline + timing.AuctionWindow
+	if got != want {
+		t.Fatalf("phaseEndAtWithRuntime(bidding) = %d, want %d", got, want)
+	}
+}
+
+func TestPhaseEndAtWithRuntimePayoutProjectionWhenDeadlineMissing(t *testing.T) {
+	t.Parallel()
+
+	nowUnix := int64(1_710_000_700)
+	period := periodViewSnapshot{
+		AuctionDeadline: 0,
+		PeriodEndAt:     0,
+	}
+	runtime := runtimeStatusSnapshot{
+		StoredPeriodStatus: 1,
+		AuctionCloseReady:  true,
+	}
+	timing := phaseTimingWindows{
+		PayoutWindow: 300,
+	}
+
+	got := phaseEndAtWithRuntime(phasePayout, "payout", period, runtime, timing, nowUnix)
+	want := nowUnix + timing.PayoutWindow
+	if got != want {
+		t.Fatalf("phaseEndAtWithRuntime(payout) = %d, want %d", got, want)
+	}
+}

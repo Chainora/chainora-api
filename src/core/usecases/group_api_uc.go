@@ -686,6 +686,7 @@ func (h *GroupHandler) upsertGroup(
 			period_duration,
 			contribution_window,
 			auction_window,
+			active_member_count,
 			tx_hash,
 			updated_at
 		 ) VALUES (
@@ -702,6 +703,7 @@ func (h *GroupHandler) upsertGroup(
 				$11,
 				$12,
 				$13,
+				1,
 				$14,
 				NOW()
 			 )
@@ -718,6 +720,10 @@ func (h *GroupHandler) upsertGroup(
 			period_duration = EXCLUDED.period_duration,
 			contribution_window = EXCLUDED.contribution_window,
 			auction_window = EXCLUDED.auction_window,
+			active_member_count = CASE
+				WHEN groups.last_synced_at IS NULL THEN GREATEST(groups.active_member_count, EXCLUDED.active_member_count)
+				ELSE groups.active_member_count
+			END,
 			tx_hash = EXCLUDED.tx_hash,
 			updated_at = NOW()
 		 RETURNING pool_id::text,
@@ -1352,24 +1358,25 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 	auctionCloseReady := false
 	finalizeReady := false
 	defaultPending := false
+	runtimeAllActiveContributed := false
+	runtimeAvailable := false
 	nowUnix := time.Now().UTC().Unix()
 
-	runtimeRaw, runtimeErr := r.call(ctx, address, "runtimeStatus")
-	if runtimeErr == nil {
-		if runtimeSnapshot, runtimeParseErr := parseRuntimeStatusOutput(runtimeRaw); runtimeParseErr == nil {
-			statusValue = uint8(runtimeSnapshot.PoolStatus)
-			currentCycleValue = runtimeSnapshot.CurrentCycle
-			currentPeriodValue = runtimeSnapshot.CurrentPeriod
-			currentPeriodStatusValue = runtimeSnapshot.StoredPeriodStatus
-			currentContributionDeadline = runtimeSnapshot.ContributionDeadline
-			cycleCompletedValue = runtimeSnapshot.CycleCompleted
-			extendVoteOpenValue = runtimeSnapshot.ExtendVoteOpen
-			extendVoteDeadlineValue = runtimeSnapshot.ExtendVoteDeadline
-			auctionReady = runtimeSnapshot.AuctionReady
-			auctionCloseReady = runtimeSnapshot.AuctionCloseReady
-			finalizeReady = runtimeSnapshot.FinalizeReady
-			defaultPending = runtimeSnapshot.DefaultPending
-		}
+	if runtimeSnapshot, runtimeErr := r.readRuntimeStatusWithRetry(ctx, address, 1); runtimeErr == nil {
+		runtimeAvailable = true
+		statusValue = uint8(runtimeSnapshot.PoolStatus)
+		currentCycleValue = runtimeSnapshot.CurrentCycle
+		currentPeriodValue = runtimeSnapshot.CurrentPeriod
+		currentPeriodStatusValue = runtimeSnapshot.StoredPeriodStatus
+		currentContributionDeadline = runtimeSnapshot.ContributionDeadline
+		cycleCompletedValue = runtimeSnapshot.CycleCompleted
+		extendVoteOpenValue = runtimeSnapshot.ExtendVoteOpen
+		extendVoteDeadlineValue = runtimeSnapshot.ExtendVoteDeadline
+		auctionReady = runtimeSnapshot.AuctionReady
+		auctionCloseReady = runtimeSnapshot.AuctionCloseReady
+		finalizeReady = runtimeSnapshot.FinalizeReady
+		defaultPending = runtimeSnapshot.DefaultPending
+		runtimeAllActiveContributed = runtimeSnapshot.AllActiveContributed
 	}
 
 	if statusValue == 1 && currentCycleValue.Sign() > 0 && currentPeriodValue.Sign() > 0 {
@@ -1407,26 +1414,34 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 	}
 
 	allActiveContributed := false
-	if statusValue == 1 &&
-		currentPeriodStatusValue == 0 &&
-		currentContributionDeadline > 0 &&
-		nowUnix >= currentContributionDeadline &&
-		len(activeMembersSnapshot) > 0 {
-		if contributedAll, contributedErr := r.allActiveMembersContributed(
-			ctx,
-			address,
-			currentCycleValue,
-			currentPeriodValue,
-			activeMembersSnapshot,
-		); contributedErr == nil {
-			allActiveContributed = contributedAll
+	if statusValue == 1 && currentPeriodStatusValue == 0 {
+		if runtimeAvailable {
+			allActiveContributed = runtimeAllActiveContributed
+		} else if currentContributionDeadline > 0 &&
+			nowUnix >= currentContributionDeadline &&
+			len(activeMembersSnapshot) > 0 {
+			if contributedAll, contributedErr := r.allActiveMembersContributed(
+				ctx,
+				address,
+				currentCycleValue,
+				currentPeriodValue,
+				activeMembersSnapshot,
+			); contributedErr == nil {
+				allActiveContributed = contributedAll
+			}
 		}
 	}
-	if !auctionReady {
-		auctionReady = currentPeriodStatusValue == 0 && currentContributionDeadline > 0 && nowUnix >= currentContributionDeadline && allActiveContributed
-	}
-	if !defaultPending {
-		defaultPending = currentPeriodStatusValue == 0 && currentContributionDeadline > 0 && nowUnix >= currentContributionDeadline && !allActiveContributed
+
+	if currentPeriodStatusValue == 0 && currentContributionDeadline > 0 && nowUnix >= currentContributionDeadline {
+		auctionReady = allActiveContributed
+		defaultPending = !allActiveContributed
+	} else if !runtimeAvailable {
+		if !auctionReady {
+			auctionReady = currentPeriodStatusValue == 0 && currentContributionDeadline > 0 && nowUnix >= currentContributionDeadline && allActiveContributed
+		}
+		if !defaultPending {
+			defaultPending = currentPeriodStatusValue == 0 && currentContributionDeadline > 0 && nowUnix >= currentContributionDeadline && !allActiveContributed
+		}
 	}
 
 	groupStatus := deriveTemporalGroupStatusFromSnapshot(
@@ -1518,6 +1533,7 @@ type runtimeStatusSnapshot struct {
 	CycleCompleted       bool
 	ExtendVoteOpen       bool
 	ExtendVoteDeadline   int64
+	AllActiveContributed bool
 	DefaultPending       bool
 	AuctionReady         bool
 	AuctionCloseReady    bool
@@ -1547,6 +1563,17 @@ func parseRuntimeStatusOutput(raw []any) (runtimeStatusSnapshot, error) {
 		}
 		return nil
 	}
+	valueAtAny := func(names []string, index int) any {
+		for _, name := range names {
+			if field := tuple.FieldByName(name); field.IsValid() {
+				return field.Interface()
+			}
+		}
+		if index >= 0 && index < tuple.NumField() {
+			return tuple.Field(index).Interface()
+		}
+		return nil
+	}
 
 	poolStatusValue := int(toUint64(valueAt("PoolStatus", 0)))
 	currentCycle, currentCycleOK := asBigInt(valueAt("CurrentCycle", 1))
@@ -1569,12 +1596,45 @@ func parseRuntimeStatusOutput(raw []any) (runtimeStatusSnapshot, error) {
 		CycleCompleted:       toBool(valueAt("CycleCompleted", 8)),
 		ExtendVoteOpen:       toBool(valueAt("ExtendVoteOpen", 9)),
 		ExtendVoteDeadline:   int64(toUint64(valueAt("ExtendVoteDeadline", 10))),
-		DefaultPending:       toBool(valueAt("DefaultPending", 12)),
+		AllActiveContributed: toBool(valueAt("AllActiveContributed", 11)),
+		DefaultPending:       toBool(valueAtAny([]string{"DefaultPending", "ArchiveReady"}, 12)),
 		AuctionReady:         toBool(valueAt("AuctionReady", 13)),
-		AuctionCloseReady:    toBool(valueAt("AuctionCloseReady", 14)),
+		AuctionCloseReady:    toBool(valueAtAny([]string{"AuctionCloseReady", "PayoutReady"}, 14)),
 		FinalizeReady:        toBool(valueAt("FinalizeReady", 15)),
 		ExtendVoteExpired:    toBool(valueAt("ExtendVoteExpired", 16)),
 	}, nil
+}
+
+func parseRuntimeStatusWithRetry(
+	callFn func() ([]any, error),
+	retryLimit int,
+) (runtimeStatusSnapshot, error) {
+	attempts := retryLimit + 1
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		raw, callErr := callFn()
+		if callErr != nil {
+			lastErr = callErr
+			continue
+		}
+
+		parsed, parseErr := parseRuntimeStatusOutput(raw)
+		if parseErr != nil {
+			lastErr = parseErr
+			continue
+		}
+
+		return parsed, nil
+	}
+
+	if lastErr == nil {
+		lastErr = errors.New("runtimeStatus read failed")
+	}
+	return runtimeStatusSnapshot{}, lastErr
 }
 
 func asBigInt(value any) (*big.Int, bool) {
@@ -1620,6 +1680,16 @@ func (r *poolStateReader) call(ctx context.Context, poolAddress common.Address, 
 	}
 
 	return decoded, nil
+}
+
+func (r *poolStateReader) readRuntimeStatusWithRetry(
+	ctx context.Context,
+	poolAddress common.Address,
+	retryLimit int,
+) (runtimeStatusSnapshot, error) {
+	return parseRuntimeStatusWithRetry(func() ([]any, error) {
+		return r.call(ctx, poolAddress, "runtimeStatus")
+	}, retryLimit)
 }
 
 func (r *poolStateReader) readAddressList(ctx context.Context, poolAddress common.Address, methods ...string) ([]common.Address, string, error) {
