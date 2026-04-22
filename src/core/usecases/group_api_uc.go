@@ -28,6 +28,11 @@ import (
 
 const groupStateSyncInterval = 10 * time.Second
 const groupStateRefreshTimeout = 6 * time.Second
+const runtimeSyncActionNone = 0
+const runtimeSyncActionArchiveReady = 1
+const runtimeSyncActionAuctionReady = 2
+const runtimeSyncActionPayoutReady = 3
+const runtimeSyncActionFinalizeReady = 4
 
 const bech32Charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 
@@ -1328,7 +1333,7 @@ func newPoolStateReader(rpcURL string) *poolStateReader {
 			{"type":"function","name":"cycleCompleted","stateMutability":"view","inputs":[],"outputs":[{"type":"bool"}]},
 			{"type":"function","name":"extendVoteState","stateMutability":"view","inputs":[],"outputs":[{"type":"bool"},{"type":"uint256"},{"type":"uint256"}]},
 			{"type":"function","name":"periodInfo","stateMutability":"view","inputs":[{"type":"uint256"},{"type":"uint256"}],"outputs":[{"type":"uint8"},{"type":"uint64"},{"type":"uint64"},{"type":"uint64"},{"type":"address"},{"type":"address"},{"type":"uint256"},{"type":"uint256"},{"type":"uint256"},{"type":"bool"},{"type":"bytes32"}]},
-			{"type":"function","name":"runtimeStatus","stateMutability":"view","inputs":[],"outputs":[{"name":"status","type":"tuple","components":[{"name":"poolStatus","type":"uint8"},{"name":"currentCycle","type":"uint256"},{"name":"currentPeriod","type":"uint256"},{"name":"storedPeriodStatus","type":"uint8"},{"name":"startAt","type":"uint64"},{"name":"contributionDeadline","type":"uint64"},{"name":"auctionDeadline","type":"uint64"},{"name":"payoutDeadline","type":"uint64"},{"name":"cycleCompleted","type":"bool"},{"name":"extendVoteOpen","type":"bool"},{"name":"extendVoteDeadline","type":"uint64"},{"name":"allActiveContributed","type":"bool"},{"name":"defaultPending","type":"bool"},{"name":"auctionReady","type":"bool"},{"name":"auctionCloseReady","type":"bool"},{"name":"finalizeReady","type":"bool"},{"name":"extendVoteExpired","type":"bool"},{"name":"unpaidActiveMembers","type":"address[]"}]}]}
+			{"type":"function","name":"runtimeStatus","stateMutability":"view","inputs":[],"outputs":[{"name":"status","type":"tuple","components":[{"name":"poolStatus","type":"uint8"},{"name":"currentCycle","type":"uint256"},{"name":"currentPeriod","type":"uint256"},{"name":"storedPeriodStatus","type":"uint8"},{"name":"syncAction","type":"uint8"},{"name":"startAt","type":"uint64"},{"name":"contributionDeadline","type":"uint64"},{"name":"auctionDeadline","type":"uint64"},{"name":"payoutDeadline","type":"uint64"},{"name":"cycleCompleted","type":"bool"},{"name":"extendVoteOpen","type":"bool"},{"name":"extendVoteDeadline","type":"uint64"},{"name":"allActiveContributed","type":"bool"},{"name":"projectedRecipient","type":"address"},{"name":"projectedDiscount","type":"uint256"},{"name":"projectedPayoutAmount","type":"uint256"},{"name":"unpaidActiveMembers","type":"address[]"}]}]}
 		]`))
 	if parseErr != nil {
 		client.Close()
@@ -1419,10 +1424,12 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 
 	currentPeriodStatusValue := 0
 	currentContributionDeadline := int64(0)
+	currentAuctionDeadline := int64(0)
 	auctionReady := false
 	auctionCloseReady := false
 	finalizeReady := false
 	defaultPending := false
+	syncAction := runtimeSyncActionNone
 	runtimeAllActiveContributed := false
 	runtimeAvailable := false
 	nowUnix := time.Now().UTC().Unix()
@@ -1434,13 +1441,15 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 		currentPeriodValue = runtimeSnapshot.CurrentPeriod
 		currentPeriodStatusValue = runtimeSnapshot.StoredPeriodStatus
 		currentContributionDeadline = runtimeSnapshot.ContributionDeadline
+		currentAuctionDeadline = runtimeSnapshot.AuctionDeadline
 		cycleCompletedValue = runtimeSnapshot.CycleCompleted
 		extendVoteOpenValue = runtimeSnapshot.ExtendVoteOpen
 		extendVoteDeadlineValue = runtimeSnapshot.ExtendVoteDeadline
-		auctionReady = runtimeSnapshot.AuctionReady
-		auctionCloseReady = runtimeSnapshot.AuctionCloseReady
-		finalizeReady = runtimeSnapshot.FinalizeReady
-		defaultPending = runtimeSnapshot.DefaultPending
+		syncAction = runtimeSnapshot.SyncAction
+		defaultPending = syncAction == runtimeSyncActionArchiveReady
+		auctionReady = syncAction == runtimeSyncActionAuctionReady
+		auctionCloseReady = syncAction == runtimeSyncActionPayoutReady
+		finalizeReady = syncAction == runtimeSyncActionFinalizeReady
 		runtimeAllActiveContributed = runtimeSnapshot.AllActiveContributed
 	}
 
@@ -1463,8 +1472,8 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 				currentContributionDeadline = int64(toUint64(periodInfoRaw[2]))
 			}
 			if len(periodInfoRaw) > 3 {
-				auctionDeadline := int64(toUint64(periodInfoRaw[3]))
-				if auctionDeadline > 0 && nowUnix >= auctionDeadline {
+				currentAuctionDeadline = int64(toUint64(periodInfoRaw[3]))
+				if currentAuctionDeadline > 0 && nowUnix >= currentAuctionDeadline {
 					auctionCloseReady = true
 				}
 			}
@@ -1497,15 +1506,14 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 		}
 	}
 
-	if currentPeriodStatusValue == 0 && currentContributionDeadline > 0 && nowUnix >= currentContributionDeadline {
-		auctionReady = allActiveContributed
-		defaultPending = !allActiveContributed
-	} else if !runtimeAvailable {
-		if !auctionReady {
-			auctionReady = currentPeriodStatusValue == 0 && currentContributionDeadline > 0 && nowUnix >= currentContributionDeadline && allActiveContributed
-		}
-		if !defaultPending {
-			defaultPending = currentPeriodStatusValue == 0 && currentContributionDeadline > 0 && nowUnix >= currentContributionDeadline && !allActiveContributed
+	if !runtimeAvailable {
+		if currentPeriodStatusValue == 0 && currentContributionDeadline > 0 && nowUnix >= currentContributionDeadline {
+			auctionReady = allActiveContributed
+			defaultPending = !allActiveContributed
+			auctionCloseReady = false
+			finalizeReady = false
+		} else if currentPeriodStatusValue == 1 && currentAuctionDeadline > 0 && nowUnix >= currentAuctionDeadline {
+			auctionCloseReady = true
 		}
 	}
 
@@ -1519,25 +1527,53 @@ func (r *poolStateReader) ReadPoolState(ctx context.Context, poolAddress string)
 		allActiveContributed,
 	)
 	if statusValue == 1 && !cycleCompletedValue {
-		switch currentPeriodStatusValue {
-		case 0:
-			if defaultPending {
+		if runtimeAvailable {
+			switch syncAction {
+			case runtimeSyncActionArchiveReady:
 				groupStatus = "deadlinepassed"
-			} else if auctionReady {
+			case runtimeSyncActionAuctionReady:
 				groupStatus = "bidding"
-			} else {
-				groupStatus = "funding"
-			}
-		case 1:
-			groupStatus = "bidding"
-		case 2:
-			if finalizeReady {
-				groupStatus = "ended_period"
-			} else {
+			case runtimeSyncActionPayoutReady:
 				groupStatus = "payout"
+			case runtimeSyncActionFinalizeReady:
+				groupStatus = "ended_period"
+			default:
+				switch currentPeriodStatusValue {
+				case 0:
+					groupStatus = "funding"
+				case 1:
+					groupStatus = "bidding"
+				case 2:
+					groupStatus = "payout"
+				case 3:
+					groupStatus = "ended_period"
+				}
 			}
-		case 3:
-			groupStatus = "ended_period"
+		} else {
+			switch currentPeriodStatusValue {
+			case 0:
+				if defaultPending {
+					groupStatus = "deadlinepassed"
+				} else if auctionReady {
+					groupStatus = "bidding"
+				} else {
+					groupStatus = "funding"
+				}
+			case 1:
+				if auctionCloseReady {
+					groupStatus = "payout"
+				} else {
+					groupStatus = "bidding"
+				}
+			case 2:
+				if finalizeReady {
+					groupStatus = "ended_period"
+				} else {
+					groupStatus = "payout"
+				}
+			case 3:
+				groupStatus = "ended_period"
+			}
 		}
 	}
 
@@ -1592,6 +1628,8 @@ type runtimeStatusSnapshot struct {
 	CurrentCycle         *big.Int
 	CurrentPeriod        *big.Int
 	StoredPeriodStatus   int
+	SyncAction           int
+	StartAt              int64
 	ContributionDeadline int64
 	AuctionDeadline      int64
 	PayoutDeadline       int64
@@ -1599,11 +1637,10 @@ type runtimeStatusSnapshot struct {
 	ExtendVoteOpen       bool
 	ExtendVoteDeadline   int64
 	AllActiveContributed bool
-	DefaultPending       bool
-	AuctionReady         bool
-	AuctionCloseReady    bool
-	FinalizeReady        bool
-	ExtendVoteExpired    bool
+	ProjectedRecipient   string
+	ProjectedDiscount    *big.Int
+	ProjectedPayout      *big.Int
+	UnpaidActiveMembers  []common.Address
 }
 
 func parseRuntimeStatusOutput(raw []any) (runtimeStatusSnapshot, error) {
@@ -1628,18 +1665,6 @@ func parseRuntimeStatusOutput(raw []any) (runtimeStatusSnapshot, error) {
 		}
 		return nil
 	}
-	valueAtAny := func(names []string, index int) any {
-		for _, name := range names {
-			if field := tuple.FieldByName(name); field.IsValid() {
-				return field.Interface()
-			}
-		}
-		if index >= 0 && index < tuple.NumField() {
-			return tuple.Field(index).Interface()
-		}
-		return nil
-	}
-
 	poolStatusValue := int(toUint64(valueAt("PoolStatus", 0)))
 	currentCycle, currentCycleOK := asBigInt(valueAt("CurrentCycle", 1))
 	if !currentCycleOK {
@@ -1649,24 +1674,34 @@ func parseRuntimeStatusOutput(raw []any) (runtimeStatusSnapshot, error) {
 	if !currentPeriodOK {
 		currentPeriod = big.NewInt(0)
 	}
+	projectedDiscount, projectedDiscountOK := asBigInt(valueAt("ProjectedDiscount", 14))
+	if !projectedDiscountOK {
+		projectedDiscount = big.NewInt(0)
+	}
+	projectedPayout, projectedPayoutOK := asBigInt(valueAt("ProjectedPayoutAmount", 15))
+	if !projectedPayoutOK {
+		projectedPayout = big.NewInt(0)
+	}
+	unpaidMembers := asAddressList(valueAt("UnpaidActiveMembers", 16))
 
 	return runtimeStatusSnapshot{
 		PoolStatus:           poolStatusValue,
 		CurrentCycle:         currentCycle,
 		CurrentPeriod:        currentPeriod,
 		StoredPeriodStatus:   int(toUint64(valueAt("StoredPeriodStatus", 3))),
-		ContributionDeadline: int64(toUint64(valueAt("ContributionDeadline", 5))),
-		AuctionDeadline:      int64(toUint64(valueAt("AuctionDeadline", 6))),
-		PayoutDeadline:       int64(toUint64(valueAt("PayoutDeadline", 7))),
-		CycleCompleted:       toBool(valueAt("CycleCompleted", 8)),
-		ExtendVoteOpen:       toBool(valueAt("ExtendVoteOpen", 9)),
-		ExtendVoteDeadline:   int64(toUint64(valueAt("ExtendVoteDeadline", 10))),
-		AllActiveContributed: toBool(valueAt("AllActiveContributed", 11)),
-		DefaultPending:       toBool(valueAtAny([]string{"DefaultPending", "ArchiveReady"}, 12)),
-		AuctionReady:         toBool(valueAt("AuctionReady", 13)),
-		AuctionCloseReady:    toBool(valueAtAny([]string{"AuctionCloseReady", "PayoutReady"}, 14)),
-		FinalizeReady:        toBool(valueAt("FinalizeReady", 15)),
-		ExtendVoteExpired:    toBool(valueAt("ExtendVoteExpired", 16)),
+		SyncAction:           int(toUint64(valueAt("SyncAction", 4))),
+		StartAt:              int64(toUint64(valueAt("StartAt", 5))),
+		ContributionDeadline: int64(toUint64(valueAt("ContributionDeadline", 6))),
+		AuctionDeadline:      int64(toUint64(valueAt("AuctionDeadline", 7))),
+		PayoutDeadline:       int64(toUint64(valueAt("PayoutDeadline", 8))),
+		CycleCompleted:       toBool(valueAt("CycleCompleted", 9)),
+		ExtendVoteOpen:       toBool(valueAt("ExtendVoteOpen", 10)),
+		ExtendVoteDeadline:   int64(toUint64(valueAt("ExtendVoteDeadline", 11))),
+		AllActiveContributed: toBool(valueAt("AllActiveContributed", 12)),
+		ProjectedRecipient:   toAddress(valueAt("ProjectedRecipient", 13)).Hex(),
+		ProjectedDiscount:    projectedDiscount,
+		ProjectedPayout:      projectedPayout,
+		UnpaidActiveMembers:  unpaidMembers,
 	}, nil
 }
 
@@ -1705,6 +1740,9 @@ func parseRuntimeStatusWithRetry(
 func asBigInt(value any) (*big.Int, bool) {
 	switch typed := value.(type) {
 	case *big.Int:
+		if typed == nil {
+			return nil, false
+		}
 		return new(big.Int).Set(typed), true
 	case uint8:
 		return new(big.Int).SetUint64(uint64(typed)), true
@@ -1720,6 +1758,21 @@ func asBigInt(value any) (*big.Int, bool) {
 		return big.NewInt(typed), true
 	default:
 		return nil, false
+	}
+}
+
+func asAddressList(value any) []common.Address {
+	switch typed := value.(type) {
+	case []common.Address:
+		return uniqueAddresses(typed)
+	case []any:
+		parsed := make([]common.Address, 0, len(typed))
+		for _, item := range typed {
+			parsed = append(parsed, toAddress(item))
+		}
+		return uniqueAddresses(parsed)
+	default:
+		return []common.Address{}
 	}
 }
 

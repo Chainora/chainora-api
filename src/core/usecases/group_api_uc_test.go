@@ -323,30 +323,35 @@ func TestParseRuntimeStatusOutputReadsAllActiveContributed(t *testing.T) {
 	t.Parallel()
 
 	output := struct {
-		PoolStatus           uint8
-		CurrentCycle         *big.Int
-		CurrentPeriod        *big.Int
-		StoredPeriodStatus   uint8
-		StartAt              uint64
-		ContributionDeadline uint64
-		AuctionDeadline      uint64
-		PayoutDeadline       uint64
-		CycleCompleted       bool
-		ExtendVoteOpen       bool
-		ExtendVoteDeadline   uint64
-		AllActiveContributed bool
-		DefaultPending       bool
-		AuctionReady         bool
-		AuctionCloseReady    bool
-		FinalizeReady        bool
-		ExtendVoteExpired    bool
+		PoolStatus            uint8
+		CurrentCycle          *big.Int
+		CurrentPeriod         *big.Int
+		StoredPeriodStatus    uint8
+		SyncAction            uint8
+		StartAt               uint64
+		ContributionDeadline  uint64
+		AuctionDeadline       uint64
+		PayoutDeadline        uint64
+		CycleCompleted        bool
+		ExtendVoteOpen        bool
+		ExtendVoteDeadline    uint64
+		AllActiveContributed  bool
+		ProjectedRecipient    common.Address
+		ProjectedDiscount     *big.Int
+		ProjectedPayoutAmount *big.Int
+		UnpaidActiveMembers   []common.Address
 	}{
-		PoolStatus:           1,
-		CurrentCycle:         big.NewInt(3),
-		CurrentPeriod:        big.NewInt(2),
-		StoredPeriodStatus:   0,
-		ContributionDeadline: 1_700_000_000,
-		AllActiveContributed: true,
+		PoolStatus:            1,
+		CurrentCycle:          big.NewInt(3),
+		CurrentPeriod:         big.NewInt(2),
+		StoredPeriodStatus:    0,
+		SyncAction:            runtimeSyncActionAuctionReady,
+		ContributionDeadline:  1_700_000_000,
+		AllActiveContributed:  true,
+		ProjectedRecipient:    common.HexToAddress(testEVMAddress),
+		ProjectedDiscount:     big.NewInt(15),
+		ProjectedPayoutAmount: big.NewInt(285),
+		UnpaidActiveMembers:   []common.Address{common.HexToAddress(testEVMAddress)},
 	}
 
 	snapshot, err := parseRuntimeStatusOutput([]any{output})
@@ -360,6 +365,15 @@ func TestParseRuntimeStatusOutputReadsAllActiveContributed(t *testing.T) {
 	if snapshot.CurrentCycle.String() != "3" || snapshot.CurrentPeriod.String() != "2" {
 		t.Fatalf("unexpected cycle/period parsed: cycle=%s period=%s", snapshot.CurrentCycle.String(), snapshot.CurrentPeriod.String())
 	}
+	if snapshot.SyncAction != runtimeSyncActionAuctionReady {
+		t.Fatalf("expected SyncAction=%d, got %d", runtimeSyncActionAuctionReady, snapshot.SyncAction)
+	}
+	if snapshot.ProjectedRecipient != common.HexToAddress(testEVMAddress).Hex() {
+		t.Fatalf("unexpected ProjectedRecipient: %s", snapshot.ProjectedRecipient)
+	}
+	if snapshot.ProjectedPayout.String() != "285" {
+		t.Fatalf("unexpected ProjectedPayout: %s", snapshot.ProjectedPayout.String())
+	}
 }
 
 func TestParseRuntimeStatusWithRetryRecoversOnSecondAttempt(t *testing.T) {
@@ -372,28 +386,29 @@ func TestParseRuntimeStatusWithRetryRecoversOnSecondAttempt(t *testing.T) {
 			return nil, errors.New("temporary rpc error")
 		}
 		return []any{struct {
-			PoolStatus           uint8
-			CurrentCycle         *big.Int
-			CurrentPeriod        *big.Int
-			StoredPeriodStatus   uint8
-			StartAt              uint64
-			ContributionDeadline uint64
-			AuctionDeadline      uint64
-			PayoutDeadline       uint64
-			CycleCompleted       bool
-			ExtendVoteOpen       bool
-			ExtendVoteDeadline   uint64
-			AllActiveContributed bool
-			DefaultPending       bool
-			AuctionReady         bool
-			AuctionCloseReady    bool
-			FinalizeReady        bool
-			ExtendVoteExpired    bool
+			PoolStatus            uint8
+			CurrentCycle          *big.Int
+			CurrentPeriod         *big.Int
+			StoredPeriodStatus    uint8
+			SyncAction            uint8
+			StartAt               uint64
+			ContributionDeadline  uint64
+			AuctionDeadline       uint64
+			PayoutDeadline        uint64
+			CycleCompleted        bool
+			ExtendVoteOpen        bool
+			ExtendVoteDeadline    uint64
+			AllActiveContributed  bool
+			ProjectedRecipient    common.Address
+			ProjectedDiscount     *big.Int
+			ProjectedPayoutAmount *big.Int
+			UnpaidActiveMembers   []common.Address
 		}{
 			PoolStatus:           1,
 			CurrentCycle:         big.NewInt(1),
 			CurrentPeriod:        big.NewInt(1),
 			StoredPeriodStatus:   0,
+			SyncAction:           runtimeSyncActionNone,
 			AllActiveContributed: true,
 		}}, nil
 	}, 1)

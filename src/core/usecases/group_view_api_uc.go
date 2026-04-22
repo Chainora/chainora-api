@@ -77,17 +77,22 @@ type groupViewPhaseMeta struct {
 }
 
 type groupViewRuntimeMeta struct {
-	StoredPeriodStatus   int   `json:"storedPeriodStatus"`
-	ContributionDeadline int64 `json:"contributionDeadline"`
-	AuctionDeadline      int64 `json:"auctionDeadline"`
-	PayoutDeadline       int64 `json:"payoutDeadline"`
-	ExtendVoteDeadline   int64 `json:"extendVoteDeadline"`
-	AllActiveContributed bool  `json:"allActiveContributed"`
-	AuctionReady         bool  `json:"auctionReady"`
-	AuctionCloseReady    bool  `json:"auctionCloseReady"`
-	FinalizeReady        bool  `json:"finalizeReady"`
-	DefaultPending       bool  `json:"defaultPending"`
-	ExtendVoteExpired    bool  `json:"extendVoteExpired"`
+	StoredPeriodStatus   int    `json:"storedPeriodStatus"`
+	SyncAction           int    `json:"syncAction"`
+	StartAt              int64  `json:"startAt"`
+	ContributionDeadline int64  `json:"contributionDeadline"`
+	AuctionDeadline      int64  `json:"auctionDeadline"`
+	PayoutDeadline       int64  `json:"payoutDeadline"`
+	ExtendVoteDeadline   int64  `json:"extendVoteDeadline"`
+	AllActiveContributed bool   `json:"allActiveContributed"`
+	ProjectedRecipient   string `json:"projectedRecipient"`
+	ProjectedDiscount    string `json:"projectedDiscount"`
+	ProjectedPayout      string `json:"projectedPayoutAmount"`
+	AuctionReady         bool   `json:"auctionReady"`
+	AuctionCloseReady    bool   `json:"auctionCloseReady"`
+	FinalizeReady        bool   `json:"finalizeReady"`
+	DefaultPending       bool   `json:"defaultPending"`
+	ExtendVoteExpired    bool   `json:"extendVoteExpired"`
 }
 
 type groupViewHistoryRow struct {
@@ -221,18 +226,28 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 	if parsedRuntime, runtimeErr := h.reader.readRuntimeStatusWithRetry(ctx, poolAddress, 1); runtimeErr == nil {
 		runtimeAvailable = true
 		runtimeSnapshot = parsedRuntime
+		isArchiveReady := parsedRuntime.SyncAction == runtimeSyncActionArchiveReady
+		isAuctionReady := parsedRuntime.SyncAction == runtimeSyncActionAuctionReady
+		isPayoutReady := parsedRuntime.SyncAction == runtimeSyncActionPayoutReady
+		isFinalizeReady := parsedRuntime.SyncAction == runtimeSyncActionFinalizeReady
+		isExtendVoteExpired := parsedRuntime.ExtendVoteDeadline > 0 && nowUnix > parsedRuntime.ExtendVoteDeadline
 		runtimeMeta = groupViewRuntimeMeta{
 			StoredPeriodStatus:   parsedRuntime.StoredPeriodStatus,
+			SyncAction:           parsedRuntime.SyncAction,
+			StartAt:              parsedRuntime.StartAt,
 			ContributionDeadline: parsedRuntime.ContributionDeadline,
 			AuctionDeadline:      parsedRuntime.AuctionDeadline,
 			PayoutDeadline:       parsedRuntime.PayoutDeadline,
 			ExtendVoteDeadline:   parsedRuntime.ExtendVoteDeadline,
 			AllActiveContributed: parsedRuntime.AllActiveContributed,
-			AuctionReady:         parsedRuntime.AuctionReady,
-			AuctionCloseReady:    parsedRuntime.AuctionCloseReady,
-			FinalizeReady:        parsedRuntime.FinalizeReady,
-			DefaultPending:       parsedRuntime.DefaultPending,
-			ExtendVoteExpired:    parsedRuntime.ExtendVoteExpired,
+			ProjectedRecipient:   parsedRuntime.ProjectedRecipient,
+			ProjectedDiscount:    parsedRuntime.ProjectedDiscount.String(),
+			ProjectedPayout:      parsedRuntime.ProjectedPayout.String(),
+			AuctionReady:         isAuctionReady,
+			AuctionCloseReady:    isPayoutReady,
+			FinalizeReady:        isFinalizeReady,
+			DefaultPending:       isArchiveReady,
+			ExtendVoteExpired:    isExtendVoteExpired,
 		}
 	}
 
@@ -413,31 +428,26 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 
 	item.GroupStatus = deriveTemporalGroupStatus(item, currentPeriodInfo, nowUnix, allActiveContributedCurrent)
 	if runtimeAvailable && item.Status == 1 {
-		switch runtimeSnapshot.StoredPeriodStatus {
-		case 0:
-			if runtimeSnapshot.ContributionDeadline > 0 && nowUnix >= runtimeSnapshot.ContributionDeadline {
-				if runtimeSnapshot.AllActiveContributed {
-					item.GroupStatus = "bidding"
-				} else {
-					item.GroupStatus = "deadlinepassed"
-				}
-			} else if runtimeSnapshot.DefaultPending {
-				item.GroupStatus = "deadlinepassed"
-			} else if runtimeSnapshot.AuctionReady {
-				item.GroupStatus = "bidding"
-			} else {
-				item.GroupStatus = "funding"
-			}
-		case 1:
+		switch runtimeSnapshot.SyncAction {
+		case runtimeSyncActionArchiveReady:
+			item.GroupStatus = "deadlinepassed"
+		case runtimeSyncActionAuctionReady:
 			item.GroupStatus = "bidding"
-		case 2:
-			if runtimeSnapshot.FinalizeReady {
-				item.GroupStatus = "ended_period"
-			} else {
-				item.GroupStatus = "payout"
-			}
-		case 3:
+		case runtimeSyncActionPayoutReady:
+			item.GroupStatus = "payout"
+		case runtimeSyncActionFinalizeReady:
 			item.GroupStatus = "ended_period"
+		default:
+			switch runtimeSnapshot.StoredPeriodStatus {
+			case 0:
+				item.GroupStatus = "funding"
+			case 1:
+				item.GroupStatus = "bidding"
+			case 2:
+				item.GroupStatus = "payout"
+			case 3:
+				item.GroupStatus = "ended_period"
+			}
 		}
 		if runtimeSnapshot.CycleCompleted && runtimeSnapshot.ExtendVoteOpen {
 			item.GroupStatus = "voting_extension"
@@ -448,6 +458,9 @@ func (h *GroupHandler) buildGroupView(ctx context.Context, item groupItem, viewe
 	selectedAllActiveContributed := false
 	if selectedCycle == currentCycle && selectedPeriod == currentPeriod {
 		selectedAllActiveContributed = allActiveContributedCurrent
+		if runtimeAvailable {
+			applyRuntimeProjectionToPeriod(&selectedPeriodInfo, runtimeSnapshot)
+		}
 	}
 
 	selectedPhase := phaseFromPeriodStatus(selectedPeriodInfo.Status, selectedPeriodInfo, nowUnix, selectedAllActiveContributed)
@@ -864,31 +877,28 @@ func (h *GroupHandler) readBigIntByAddress(
 }
 
 func phaseFromRuntime(runtime runtimeStatusSnapshot, groupStatus string, nowUnix int64) string {
+	_ = nowUnix
 	if strings.EqualFold(groupStatus, "voting_extension") || strings.EqualFold(groupStatus, "archived") {
+		return phaseEnding
+	}
+
+	switch runtime.SyncAction {
+	case runtimeSyncActionArchiveReady:
+		return phaseEnding
+	case runtimeSyncActionAuctionReady:
+		return phaseBidding
+	case runtimeSyncActionPayoutReady:
+		return phasePayout
+	case runtimeSyncActionFinalizeReady:
 		return phaseEnding
 	}
 
 	switch runtime.StoredPeriodStatus {
 	case 0:
-		if runtime.ContributionDeadline > 0 && nowUnix >= runtime.ContributionDeadline {
-			if runtime.AllActiveContributed {
-				return phaseBidding
-			}
-			return phaseEnding
-		}
-		if runtime.AuctionReady {
-			return phaseBidding
-		}
-		if runtime.DefaultPending {
-			return phaseEnding
-		}
 		return phaseFunding
 	case 1:
 		return phaseBidding
 	case 2:
-		if runtime.FinalizeReady {
-			return phaseEnding
-		}
 		return phasePayout
 	case 3:
 		return phaseEnding
@@ -904,8 +914,13 @@ func phaseStartAtWithRuntime(
 	timing phaseTimingWindows,
 	nowUnix int64,
 ) int64 {
+	_ = timing
+	_ = nowUnix
 	switch phase {
 	case phaseFunding:
+		if runtime.StartAt > 0 {
+			return runtime.StartAt
+		}
 		return period.StartAt
 	case phaseBidding:
 		if runtime.ContributionDeadline > 0 {
@@ -918,16 +933,6 @@ func phaseStartAtWithRuntime(
 		}
 		if period.AuctionDeadline > 0 {
 			return period.AuctionDeadline
-		}
-		if runtime.StoredPeriodStatus == 0 &&
-			runtime.ContributionDeadline > 0 &&
-			nowUnix >= runtime.ContributionDeadline &&
-			runtime.AllActiveContributed &&
-			timing.AuctionWindow > 0 {
-			return runtime.ContributionDeadline + timing.AuctionWindow
-		}
-		if runtime.StoredPeriodStatus == 1 && runtime.AuctionCloseReady {
-			return nowUnix
 		}
 		return 0
 	case phaseEnding:
@@ -948,6 +953,8 @@ func phaseEndAtWithRuntime(
 	timing phaseTimingWindows,
 	nowUnix int64,
 ) int64 {
+	_ = timing
+	_ = nowUnix
 	switch phase {
 	case phaseFunding:
 		if runtime.ContributionDeadline > 0 {
@@ -961,19 +968,6 @@ func phaseEndAtWithRuntime(
 		if period.AuctionDeadline > 0 {
 			return period.AuctionDeadline
 		}
-		if timing.AuctionWindow > 0 {
-			if runtime.StoredPeriodStatus == 0 &&
-				runtime.ContributionDeadline > 0 &&
-				nowUnix >= runtime.ContributionDeadline &&
-				runtime.AllActiveContributed {
-				return runtime.ContributionDeadline + timing.AuctionWindow
-			}
-			startAt := phaseStartAtWithRuntime(phaseBidding, period, runtime, timing, nowUnix)
-			if startAt > 0 {
-				return startAt + timing.AuctionWindow
-			}
-			return nowUnix + timing.AuctionWindow
-		}
 		return 0
 	case phasePayout:
 		if runtime.PayoutDeadline > 0 {
@@ -981,13 +975,6 @@ func phaseEndAtWithRuntime(
 		}
 		if period.PeriodEndAt > 0 {
 			return period.PeriodEndAt
-		}
-		if timing.PayoutWindow > 0 {
-			startAt := phaseStartAtWithRuntime(phasePayout, period, runtime, timing, nowUnix)
-			if startAt > 0 {
-				return startAt + timing.PayoutWindow
-			}
-			return nowUnix + timing.PayoutWindow
 		}
 		return 0
 	case phaseEnding:
@@ -1000,6 +987,32 @@ func phaseEndAtWithRuntime(
 		return period.PeriodEndAt
 	default:
 		return 0
+	}
+}
+
+func applyRuntimeProjectionToPeriod(period *periodViewSnapshot, runtime runtimeStatusSnapshot) {
+	if period == nil {
+		return
+	}
+
+	zeroAddress := common.Address{}.Hex()
+	projectedRecipient := strings.TrimSpace(runtime.ProjectedRecipient)
+	if projectedRecipient != "" && !strings.EqualFold(projectedRecipient, zeroAddress) {
+		if strings.EqualFold(strings.TrimSpace(period.Recipient), zeroAddress) {
+			period.Recipient = projectedRecipient
+		}
+	}
+
+	if runtime.ProjectedDiscount != nil && runtime.ProjectedDiscount.Sign() > 0 {
+		if discountValue, ok := new(big.Int).SetString(strings.TrimSpace(period.BestDiscount), 10); !ok || discountValue.Sign() == 0 {
+			period.BestDiscount = runtime.ProjectedDiscount.String()
+		}
+	}
+
+	if runtime.ProjectedPayout != nil && runtime.ProjectedPayout.Sign() > 0 {
+		if payoutValue, ok := new(big.Int).SetString(strings.TrimSpace(period.PayoutAmount), 10); !ok || payoutValue.Sign() == 0 {
+			period.PayoutAmount = runtime.ProjectedPayout.String()
+		}
 	}
 }
 
@@ -1292,24 +1305,31 @@ func buildPhasePermissions(input phasePermissionInput) groupViewPermissions {
 	canCloseAuction := input.periodInfo.AuctionDeadline > 0 && input.nowUnix >= input.periodInfo.AuctionDeadline
 	canFinalize := input.periodInfo.Status == 2 && input.periodInfo.PeriodEndAt > 0 && input.nowUnix >= input.periodInfo.PeriodEndAt
 	canVoteExtend := isVotingExtension
-	runtimeCollectingSyncToPayout := false
+	runtimeAction := runtimeSyncActionNone
+	isArchiveReady := false
+	isAuctionReady := false
+	isPayoutReady := false
+	isFinalizeReady := false
+	extendVoteExpired := false
 
 	if input.runtimeAvailable {
-		runtimeCollectingSyncToPayout = input.runtime.StoredPeriodStatus == 0 &&
-			input.runtime.AllActiveContributed &&
-			input.runtime.ContributionDeadline > 0 &&
-			input.nowUnix >= input.runtime.ContributionDeadline &&
-			!input.runtime.AuctionReady
+		runtimeAction = input.runtime.SyncAction
+		isArchiveReady = runtimeAction == runtimeSyncActionArchiveReady
+		isAuctionReady = runtimeAction == runtimeSyncActionAuctionReady
+		isPayoutReady = runtimeAction == runtimeSyncActionPayoutReady
+		isFinalizeReady = runtimeAction == runtimeSyncActionFinalizeReady
+		extendVoteExpired = input.runtime.ExtendVoteDeadline > 0 && input.nowUnix > input.runtime.ExtendVoteDeadline
 		canContributeNow = input.runtime.StoredPeriodStatus == 0 &&
-			!input.runtime.DefaultPending &&
+			runtimeAction == runtimeSyncActionNone &&
 			(input.runtime.ContributionDeadline <= 0 || input.nowUnix < input.runtime.ContributionDeadline)
 		canBidNow = !lastPeriodNoBid &&
-			!input.runtime.DefaultPending &&
-			(input.runtime.StoredPeriodStatus == 1 || (input.runtime.StoredPeriodStatus == 0 && input.runtime.AuctionReady)) &&
-			!input.runtime.AuctionCloseReady
-		canCloseAuction = input.runtime.AuctionCloseReady || runtimeCollectingSyncToPayout
-		canFinalize = input.runtime.FinalizeReady
-		canVoteExtend = isVotingExtension && !input.runtime.ExtendVoteExpired
+			!isArchiveReady &&
+			(input.runtime.StoredPeriodStatus == 1 || isAuctionReady) &&
+			!isPayoutReady &&
+			!isFinalizeReady
+		canCloseAuction = isPayoutReady
+		canFinalize = isFinalizeReady
+		canVoteExtend = isVotingExtension && !extendVoteExpired
 	}
 
 	if canActInPhase &&
@@ -1339,7 +1359,7 @@ func buildPhasePermissions(input phasePermissionInput) groupViewPermissions {
 		input.selectedPhase == phasePayout &&
 		viewerIsRecipient &&
 		!input.periodInfo.PayoutClaimed {
-		if !input.runtimeAvailable || input.runtime.StoredPeriodStatus == 2 || input.runtime.AuctionCloseReady {
+		if !input.runtimeAvailable || (input.runtime.StoredPeriodStatus == 2 && !isFinalizeReady) || isPayoutReady {
 			permissions.CanClaim = true
 		}
 	}
@@ -1357,7 +1377,7 @@ func buildPhasePermissions(input phasePermissionInput) groupViewPermissions {
 		switch input.selectedPhase {
 		case phaseFunding:
 			if !permissions.CanContribute {
-				if input.runtimeAvailable && input.runtime.DefaultPending {
+				if input.runtimeAvailable && isArchiveReady {
 					permissions.DisabledReason = "Funding is blocked because at least one active member missed contribution."
 				} else if input.hasContributedByViewer {
 					permissions.DisabledReason = "Contribution already submitted for this period."
@@ -1374,11 +1394,11 @@ func buildPhasePermissions(input phasePermissionInput) groupViewPermissions {
 				permissions.DisabledReason = "Final period has no bidding. Remaining member receives payout directly."
 			} else if !permissions.CanBid && !permissions.CanCloseAuction {
 				if input.runtimeAvailable {
-					if input.runtime.DefaultPending {
+					if isArchiveReady {
 						permissions.DisabledReason = "Bidding is blocked because some active members missed contribution."
-					} else if runtimeCollectingSyncToPayout || input.runtime.AuctionCloseReady {
-						permissions.DisabledReason = "Auction deadline reached. Trigger runtime sync to open payout."
-					} else if input.runtime.StoredPeriodStatus == 0 && !input.runtime.AuctionReady {
+					} else if isPayoutReady || isFinalizeReady {
+						permissions.DisabledReason = "Auction ended. Pool is transitioning to payout."
+					} else if input.runtime.StoredPeriodStatus == 0 && !isAuctionReady {
 						permissions.DisabledReason = "Bidding opens after all active members contribute and collecting window closes."
 					} else {
 						permissions.DisabledReason = "Bidding is unavailable for your wallet in this phase."
@@ -1399,7 +1419,7 @@ func buildPhasePermissions(input phasePermissionInput) groupViewPermissions {
 					permissions.DisabledReason = "Payout already claimed for this period."
 				} else if !viewerIsRecipient {
 					permissions.DisabledReason = "Only the selected recipient can claim payout while payout is open."
-				} else if input.runtimeAvailable && input.runtime.FinalizeReady {
+				} else if input.runtimeAvailable && isFinalizeReady {
 					permissions.DisabledReason = "Payout window ended. Trigger ending to continue the lifecycle."
 				} else {
 					permissions.DisabledReason = "Claim is unavailable in current runtime state."
@@ -1409,13 +1429,13 @@ func buildPhasePermissions(input phasePermissionInput) groupViewPermissions {
 			if isDeadlinePassed {
 				permissions.DisabledReason = "Contribution deadline passed before all active members contributed."
 			} else if isVotingExtension {
-				if input.runtimeAvailable && input.runtime.ExtendVoteExpired {
+				if input.runtimeAvailable && extendVoteExpired {
 					permissions.DisabledReason = "Extension vote window expired. Active members can archive."
 				} else if !permissions.CanVoteExtend {
 					permissions.DisabledReason = "Extension voting is unavailable for this selection."
 				}
 			} else if !permissions.CanFinalize {
-				if input.runtimeAvailable && input.runtime.StoredPeriodStatus == 2 && !input.runtime.FinalizeReady {
+				if input.runtimeAvailable && input.runtime.StoredPeriodStatus == 2 && !isFinalizeReady {
 					permissions.DisabledReason = "Finalize is available when payout deadline is reached."
 				} else {
 					permissions.DisabledReason = "Finalize is available after payout deadline."
