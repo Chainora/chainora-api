@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -144,6 +145,12 @@ func Load() properties.AppProperties {
 		strings.TrimSpace(raw.Card.DeviceVerifierPrivateKey),
 		relayerMasterPrivateKey,
 	)
+	reputationVerifierPrivateKey := secretString("REPUTATION_VERIFIER_PRIVATE_KEY", "", "")
+	reputationTxSenderPrivateKey := secretString("REPUTATION_TX_SENDER_PRIVATE_KEY", "", "")
+	reputationSyncDeadlineSeconds := int64(parseIntEnv("REPUTATION_SYNC_DEADLINE_SECONDS", 600))
+	reputationSyncRetryMax := parseIntEnv("REPUTATION_SYNC_RETRY_MAX", 2)
+	reputationSyncCooldownSeconds := int64(parseIntEnv("REPUTATION_SYNC_COOLDOWN_SECONDS", 15))
+	reputationSyncBatchSize := parseIntEnv("REPUTATION_SYNC_BATCH_SIZE", 100)
 
 	return properties.AppProperties{
 		ServerPort:                     fallback(strings.TrimSpace(raw.Server.Port), "8080"),
@@ -181,6 +188,12 @@ func Load() properties.AppProperties {
 		RelayerDryRun:                  raw.Relayer.DryRun,
 		CardFactoryRootPublicKey:       fallback(strings.TrimSpace(raw.Card.FactoryRootPublicKey), "043e5662949af3d3bdf8c226bdd8444098a14f8960870ccb5be55bbe098b363aadd06109c1c50cfcfb44f80ecd082fd1d00fc8de8c73ed521ad0bab962422f721a"),
 		CardDeviceVerifierPrivateKey:   cardDeviceVerifierPrivateKey,
+		ReputationVerifierPrivateKey:   reputationVerifierPrivateKey,
+		ReputationTxSenderPrivateKey:   reputationTxSenderPrivateKey,
+		ReputationSyncDeadlineSeconds:  reputationSyncDeadlineSeconds,
+		ReputationSyncRetryMax:         reputationSyncRetryMax,
+		ReputationSyncCooldownSeconds:  reputationSyncCooldownSeconds,
+		ReputationSyncBatchSize:        reputationSyncBatchSize,
 		CloudinaryCloudName:            cloudName,
 		CloudinaryAPIKey:               cloudAPIKey,
 		CloudinaryAPISecret:            cloudAPISecret,
@@ -258,6 +271,19 @@ func maxBodyBytes(value int64) int64 {
 		return 8 << 20
 	}
 	return value
+}
+
+func parseIntEnv(envKey string, defaultValue int) int {
+	value := strings.TrimSpace(os.Getenv(envKey))
+	if value == "" {
+		return defaultValue
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return defaultValue
+	}
+	return parsed
 }
 
 func fallback(value, defaultValue string) string {

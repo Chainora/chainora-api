@@ -72,6 +72,13 @@ Start API server:
 make rest
 ```
 
+Run one-shot reputation backfill (sync DB `users.reputation_score` to on-chain `ChainoraReputationAdapter`):
+
+```bash
+cd src/rest
+go run . reputation-backfill [optional-pool-address]
+```
+
 Run worker:
 
 ```bash
@@ -122,4 +129,11 @@ make abigen-gen ABI_FILE=path/to/Contract.abi BIN_FILE=path/to/Contract.bin OUT_
 - Current auth repository implementation is in-memory (`sync.Map`).
 - Signature verification uses EIP-191 + secp256k1 recovery and handles both `v=0/1` and `v=27/28`.
 - Username feature guide: `docs/USERNAME_FEATURE.md`.
+- Reputation sync env (secret env only):
+  - `REPUTATION_VERIFIER_PRIVATE_KEY`
+  - `REPUTATION_TX_SENDER_PRIVATE_KEY`
+  - `REPUTATION_SYNC_DEADLINE_SECONDS` (default `600`)
+  - `REPUTATION_SYNC_RETRY_MAX` (default `2`)
+  - `REPUTATION_SYNC_COOLDOWN_SECONDS` (default `15`)
+  - `REPUTATION_SYNC_BATCH_SIZE` (default `100`)
 # chainora-api

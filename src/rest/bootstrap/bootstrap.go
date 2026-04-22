@@ -111,7 +111,14 @@ func Build() *App {
 	if cardHandlerErr != nil {
 		log.Fatalf("[bootstrap] invalid card factory root public key: %v", cardHandlerErr)
 	}
-	groupController := controllers.NewGroupController(dbConn, jwtService, cfg.ChainoraRPCURL)
+	groupController := controllers.NewGroupControllerWithOptions(
+		dbConn,
+		jwtService,
+		cfg.ChainoraRPCURL,
+		usecases.GroupHandlerOptions{
+			ReputationSyncConfig: buildReputationSyncConfig(cfg),
+		},
+	)
 	mediaController := controllers.NewMediaController(
 		jwtService,
 		cfg.CloudinaryCloudName,
@@ -144,4 +151,16 @@ func Build() *App {
 
 func (a *App) Address() string {
 	return fmt.Sprintf(":%s", a.Config.ServerPort)
+}
+
+func buildReputationSyncConfig(cfg restprops.AppProperties) usecases.ReputationSyncConfig {
+	return usecases.ReputationSyncConfig{
+		RPCURL:             strings.TrimSpace(cfg.ChainoraRPCURL),
+		VerifierPrivateKey: strings.TrimSpace(cfg.ReputationVerifierPrivateKey),
+		TxSenderPrivateKey: strings.TrimSpace(cfg.ReputationTxSenderPrivateKey),
+		DeadlineSeconds:    cfg.ReputationSyncDeadlineSeconds,
+		RetryMax:           cfg.ReputationSyncRetryMax,
+		CooldownSeconds:    cfg.ReputationSyncCooldownSeconds,
+		BatchSize:          cfg.ReputationSyncBatchSize,
+	}
 }

@@ -34,10 +34,11 @@ const bech32Charset = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 var bech32CharsetRev = buildBech32CharsetRev()
 
 type GroupHandler struct {
-	db       *sql.DB
-	issuer   TokenIssuer
-	validate *validator.Validate
-	reader   *poolStateReader
+	db               *sql.DB
+	issuer           TokenIssuer
+	validate         *validator.Validate
+	reader           *poolStateReader
+	reputationSyncer *ReputationSyncService
 
 	refreshMu        sync.Mutex
 	refreshingByPool map[string]struct{}
@@ -129,12 +130,26 @@ type poolStateReader struct {
 	poolABI abi.ABI
 }
 
+type GroupHandlerOptions struct {
+	ReputationSyncConfig ReputationSyncConfig
+}
+
 func NewGroupHandler(db *sql.DB, issuer TokenIssuer, rpcURL string) *GroupHandler {
+	return NewGroupHandlerWithOptions(db, issuer, rpcURL, GroupHandlerOptions{})
+}
+
+func NewGroupHandlerWithOptions(db *sql.DB, issuer TokenIssuer, rpcURL string, options GroupHandlerOptions) *GroupHandler {
+	reputationSyncer, syncErr := NewReputationSyncService(db, options.ReputationSyncConfig)
+	if syncErr != nil {
+		log.Printf("[groups] reputation sync disabled: %v", syncErr)
+	}
+
 	return &GroupHandler{
 		db:               db,
 		issuer:           issuer,
 		validate:         validator.New(),
 		reader:           newPoolStateReader(rpcURL),
+		reputationSyncer: reputationSyncer,
 		refreshingByPool: make(map[string]struct{}),
 	}
 }
@@ -1018,7 +1033,57 @@ func (h *GroupHandler) refreshGroupState(ctx context.Context, item groupItem, tr
 		}
 	}
 
+	if h.reputationSyncer != nil && state.CycleCompleted && len(state.ActiveMembers) > 0 {
+		h.reputationSyncer.QueuePoolCycleSync(item.PoolID, state.CurrentCycle, item.PoolAddress, state.ActiveMembers)
+	}
+
 	return item, nil
+}
+
+func (h *GroupHandler) RunReputationBackfill(ctx context.Context, poolAddress string, batchSize int) (ReputationBackfillResult, error) {
+	if h == nil || h.reputationSyncer == nil {
+		return ReputationBackfillResult{}, fmt.Errorf("reputation sync service is unavailable")
+	}
+
+	selectedPoolAddress := strings.TrimSpace(poolAddress)
+	if selectedPoolAddress == "" {
+		discoveredPoolAddress, err := h.discoverBackfillPoolAddress(ctx)
+		if err != nil {
+			return ReputationBackfillResult{}, err
+		}
+		selectedPoolAddress = discoveredPoolAddress
+	}
+
+	return h.reputationSyncer.BackfillFromDB(ctx, selectedPoolAddress, batchSize)
+}
+
+func (h *GroupHandler) discoverBackfillPoolAddress(ctx context.Context) (string, error) {
+	if h == nil || h.db == nil {
+		return "", fmt.Errorf("groups storage unavailable")
+	}
+
+	var poolAddressRaw sql.NullString
+	err := h.db.QueryRowContext(
+		ctx,
+		`SELECT pool_address
+		 FROM groups
+		 WHERE pool_address IS NOT NULL AND TRIM(pool_address) <> ''
+		 ORDER BY updated_at DESC
+		 LIMIT 1`,
+	).Scan(&poolAddressRaw)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("unable to discover backfill pool address: groups table has no pool")
+		}
+		return "", fmt.Errorf("discover backfill pool address: %w", err)
+	}
+
+	poolAddress := strings.TrimSpace(poolAddressRaw.String)
+	if !common.IsHexAddress(poolAddress) {
+		return "", fmt.Errorf("discovered pool address is invalid")
+	}
+
+	return poolAddress, nil
 }
 
 func (h *GroupHandler) applyCycleCompletionBaseReputation(ctx context.Context, item groupItem, activeMembers []common.Address) error {

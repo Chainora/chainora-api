@@ -39,6 +39,12 @@ type AppProperties struct {
 	RelayerDryRun                  bool
 	CardFactoryRootPublicKey       string
 	CardDeviceVerifierPrivateKey   string
+	ReputationVerifierPrivateKey   string
+	ReputationTxSenderPrivateKey   string
+	ReputationSyncDeadlineSeconds  int64
+	ReputationSyncRetryMax         int
+	ReputationSyncCooldownSeconds  int64
+	ReputationSyncBatchSize        int
 	CloudinaryCloudName            string
 	CloudinaryAPIKey               string
 	CloudinaryAPISecret            string

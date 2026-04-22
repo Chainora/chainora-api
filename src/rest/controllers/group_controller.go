@@ -13,7 +13,16 @@ type GroupController struct {
 }
 
 func NewGroupController(db *sql.DB, issuer usecases.TokenIssuer, rpcURL string) *GroupController {
-	return &GroupController{handler: usecases.NewGroupHandler(db, issuer, rpcURL)}
+	return NewGroupControllerWithOptions(db, issuer, rpcURL, usecases.GroupHandlerOptions{})
+}
+
+func NewGroupControllerWithOptions(
+	db *sql.DB,
+	issuer usecases.TokenIssuer,
+	rpcURL string,
+	options usecases.GroupHandlerOptions,
+) *GroupController {
+	return &GroupController{handler: usecases.NewGroupHandlerWithOptions(db, issuer, rpcURL, options)}
 }
 
 func (c *GroupController) ListGroups(ctx *gin.Context)   { c.handler.ListGroups(ctx) }
