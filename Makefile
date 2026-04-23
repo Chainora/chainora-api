@@ -3,16 +3,17 @@ SHELL := /bin/bash
 .PHONY: rest worker tidy migrate migrate-up migrate-all migration abigen abigen-gen
 MIGRATION_NAME ?= migration
 ABIGEN ?= $(shell go env GOPATH)/bin/abigen
+CGO_ENABLED ?= 0
 ABI_FILE ?=
 BIN_FILE ?=
 OUT_FILE ?=
 OUT_PKG ?= contract
 
 rest:
-	cd src/rest && go run .
+	cd src/rest && CGO_ENABLED=$(CGO_ENABLED) go run .
 
 worker:
-	cd src/worker && go run .
+	cd src/worker && CGO_ENABLED=$(CGO_ENABLED) go run .
 
 tidy:
 	cd src/core && go mod tidy
@@ -22,7 +23,7 @@ tidy:
 	cd src/worker && go mod tidy
 
 migrate:
-	cd src/migration && go run .
+	cd src/migration && CGO_ENABLED=$(CGO_ENABLED) go run .
 
 migrate-up:
 	$(MAKE) migrate

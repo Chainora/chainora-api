@@ -1,139 +1,146 @@
 # Chainora API
 
-Backend service for Chainora QR login flow (Web DApp + Mobile App + JavaCard signature verification).
+Backend service for Chainora QR login flow across the web dApp, native wallet, and card verification flows.
+
+## Supported Local Setup
+
+- Go `1.25.x`
+- Supabase Postgres via a direct connection string with SSL
+- Windows PowerShell is the primary local workflow for this repository
+
+`make` remains available for Unix-like environments, but the checked-in `Makefile` assumes `/bin/bash`. On Windows, run the Go commands directly.
+
+## Configuration Model
+
+- Public, non-secret settings live in:
+  - `src/rest/config/config.yaml`
+  - `src/worker/config/config.yaml`
+- Secrets live in `src/migration/config/.env`
+- Both REST and worker auto-load `src/migration/config/.env` when started from their module directories
+
+Do not place secrets in YAML. The REST loader will panic if values like `jwt.secret` or `database.url` are committed there.
 
 ## Quick Start
 
-## Prerequisites
+### 1. Create the secret env file
 
-### Go Environment Setup
+Copy `src/migration/config/.env.example` to `src/migration/config/.env`.
 
-Use Go `1.24.x` (or newer compatible with this repository).
+Minimum values to fill:
 
-Verify these environment variables:
-- `GOROOT`: Go installation directory
-- `GOPATH`: local Go workspace path
+- `DATABASE_URL`: Supabase direct Postgres URL with `sslmode=require`
+- `JWT_SECRET`
+- `CHAINORA_RPC_URL`
 
-Recommendation: use `gvm` (Go Version Manager) to manage versions and quickly switch environments.
+Optional feature flags and secrets are documented inline in the example file.
 
-### Docker (optional)
+Example Supabase direct connection string:
 
-Docker is only needed when you want to build/run the backend image locally.
-
-### Abigen
-
-Install the Go binding generator for Ethereum smart contracts:
-
-```bash
-go install github.com/ethereum/go-ethereum/cmd/abigen@v1.11.5
+```env
+DATABASE_URL=postgresql://postgres.<project-ref>:<password>@db.<project-ref>.supabase.co:5432/postgres?sslmode=require
 ```
 
-Or run:
+### 2. Review public YAML config
 
-```bash
-make abigen
+Update these files only for non-secret settings such as ports, CORS origins, or public RPC endpoints:
+
+- `src/rest/config/config.yaml`
+- `src/worker/config/config.yaml`
+
+### 3. Install and tidy modules
+
+PowerShell:
+
+```powershell
+cd src\core
+go mod tidy
+
+cd ..\adapter
+go mod tidy
+
+cd ..\migration
+go mod tidy
+
+cd ..\rest
+go mod tidy
+
+cd ..\worker
+go mod tidy
 ```
 
-## Bring Up Local Development Environment
+### 4. Run migrations
 
-### Initialize Module Config
+PowerShell:
 
-Use module-local config files:
-
-```bash
-# edit directly (already created in repo)
-vi ./src/rest/config/config.yaml
-vi ./src/worker/config/config.yaml
-
-# only migration env needs a private local file
-cp ./src/migration/config/.env.example ./src/migration/config/.env
+```powershell
+cd src\migration
+go run .
 ```
 
-Policy:
-- `src/rest/config/config.yaml` and `src/worker/config/config.yaml` are public, prefilled, non-secret config.
-- Sensitive values (JWT secret, DB URL, relayer private key) stay in hidden `src/migration/config/.env` and are loaded for runtime secrets.
-- REST security controls are configured in YAML under `security`:
-	- `allowed_origins`
-	- `max_request_body_bytes`
-	- `allow_empty_origin_for_ws`
+### 5. Start the services
 
-### Run Setup Commands
+REST API:
 
-Run these commands in order:
-
-```bash
-make tidy
-make migrate
+```powershell
+cd src\rest
+$env:CGO_ENABLED = "0"
+go run .
 ```
 
-Start API server:
+Worker:
 
-```bash
-make rest
+```powershell
+cd src\worker
+$env:CGO_ENABLED = "0"
+go run .
 ```
 
-Run one-shot reputation backfill (sync DB `users.reputation_score` to on-chain `ChainoraReputationAdapter`):
+### 6. Optional commands
 
-```bash
-cd src/rest
+Reputation backfill:
+
+```powershell
+cd src\rest
+$env:CGO_ENABLED = "0"
 go run . reputation-backfill [optional-pool-address]
 ```
 
-Run worker:
+Install `abigen` only when regenerating Ethereum bindings:
 
-```bash
-make worker
+```powershell
+go install github.com/ethereum/go-ethereum/cmd/abigen@v1.11.5
 ```
 
-## Making Migrations
+## Validation
 
-Create a new migration file:
+PowerShell:
 
-```bash
-make migration
+```powershell
+cd src\rest
+$env:CGO_ENABLED = "0"
+go test ./...
+
+cd ..\core
+$env:CGO_ENABLED = "0"
+go test ./...
+
+cd ..\worker
+$env:CGO_ENABLED = "0"
+go test ./...
 ```
 
-Optional custom name:
-
-```bash
-make migration MIGRATION_NAME=create_auth_sessions
-```
-
-## Generate Go Binding For Smart Contracts
-
-```bash
-make abigen
-```
-
-Generate bindings from ABI/BIN:
-
-```bash
-make abigen-gen ABI_FILE=path/to/Contract.abi BIN_FILE=path/to/Contract.bin OUT_FILE=src/adapter/ethclient/contract.go OUT_PKG=ethclient
-```
+Known issue: `src/core` currently has a duplicate fake SQL driver registration in tests. Treat that as a repo issue, not a setup failure.
 
 ## Project Structure
 
 - `src/core`: domain entities, constants, properties, and usecases
-- `src/adapter`: repository/service/eth clients
-- `src/rest`: controllers, routers, middlewares, bootstrap, config
+- `src/adapter`: repositories, external services, and chain clients
+- `src/rest`: HTTP server, bootstrap, routing, and config loading
+- `src/worker`: scheduled background jobs
 - `src/migration`: SQL migration runner and migration files
 
 ## Authentication Endpoints
 
 - `GET /v1/auth/session`
-- `GET /v1/auth/ws/:sessionId` (WebSocket)
+- `GET /v1/auth/ws/:sessionId`
 - `POST /v1/auth/verify`
-
-## Notes
-
-- Current auth repository implementation is in-memory (`sync.Map`).
-- Signature verification uses EIP-191 + secp256k1 recovery and handles both `v=0/1` and `v=27/28`.
-- Username feature guide: `docs/USERNAME_FEATURE.md`.
-- Reputation sync env (secret env only):
-  - `REPUTATION_VERIFIER_PRIVATE_KEY`
-  - `REPUTATION_TX_SENDER_PRIVATE_KEY`
-  - `REPUTATION_SYNC_DEADLINE_SECONDS` (default `600`)
-  - `REPUTATION_SYNC_RETRY_MAX` (default `2`)
-  - `REPUTATION_SYNC_COOLDOWN_SECONDS` (default `15`)
-  - `REPUTATION_SYNC_BATCH_SIZE` (default `100`)
-# chainora-api

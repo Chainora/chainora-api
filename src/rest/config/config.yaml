@@ -18,11 +18,11 @@ auth:
   message_template: "Sign this to login to Chainora: %s"
 
 initia:
-  rpc_url: "http://157.66.100.120:8545/"
+  rpc_url: "http://23.94.63.207:8545"
   api_url: "https://api.testnet.initia.xyz"
 
 chainora:
-  rpc_url: "http://157.66.100.120:8545/"
+  rpc_url: "http://23.94.63.207:8545"
 
 database:
   url: ""
