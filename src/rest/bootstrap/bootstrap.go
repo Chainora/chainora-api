@@ -99,9 +99,21 @@ func Build() *App {
 	txUsecase := usecases.NewTxInteractor()
 
 	hub := usecases.NewWSHub()
+	relayHub := usecases.NewRelayHub(usecases.RelayHubConfig{
+		PairTTL:         cfg.WalletRelayPairTTL,
+		RequestTimeout:  cfg.WalletRelayRequestTimeout,
+		CleanupInterval: cfg.WalletRelayCleanupInterval,
+		PairingScheme:   cfg.WalletRelayPairingScheme,
+	})
 	wsOriginChecker := middlewares.WSOriginChecker(cfg.AllowedOrigins, cfg.AllowEmptyOriginForWS)
-	authController := controllers.NewAuthController(authUsecase, jwtService, dbConn, hub, initiaUsernameService, wsOriginChecker)
+	authController := controllers.NewAuthController(authUsecase, jwtService, dbConn, initiaUsernameService)
 	relayerController := controllers.NewRelayerController(relayerUsecase, hub, wsOriginChecker)
+	walletRelayController := controllers.NewWalletRelayController(
+		relayHub,
+		wsOriginChecker,
+		cfg.WalletRelayWSBase,
+		cfg.WalletRelayPingInterval,
+	)
 	cardController, cardHandlerErr := controllers.NewCardController(
 		authRepository,
 		cfg.CardFactoryRootPublicKey,
@@ -137,10 +149,10 @@ func Build() *App {
 	r.Use(cors.New(middlewares.CORS(cfg.AllowedOrigins)))
 
 	v1 := r.Group("/v1")
-	routers.RegisterRoutes(v1, authController, txController, relayerController, cardController, groupController, mediaController, notificationController)
+	routers.RegisterRoutes(v1, authController, txController, relayerController, walletRelayController, cardController, groupController, mediaController, notificationController)
 
 	apiV1 := r.Group("/api/v1")
-	routers.RegisterRoutes(apiV1, authController, txController, relayerController, cardController, groupController, mediaController, notificationController)
+	routers.RegisterRoutes(apiV1, authController, txController, relayerController, walletRelayController, cardController, groupController, mediaController, notificationController)
 
 	r.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"ok": true})

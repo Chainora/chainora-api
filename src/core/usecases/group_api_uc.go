@@ -210,6 +210,7 @@ func (h *GroupHandler) ListGroups(ctx *gin.Context) {
 		return
 	}
 	ownerFilter := ""
+	joinedByAddress := ""
 	recruitingOnly := false
 	publicOnly := false
 	privateOnly := false
@@ -226,6 +227,13 @@ func (h *GroupHandler) ListGroups(ctx *gin.Context) {
 		ownerFilter = strings.ToLower(strings.TrimSpace(address))
 	case "recruiting":
 		recruitingOnly = true
+	case "joined":
+		address, err := h.authenticatedAddress(ctx)
+		if err != nil {
+			response.WriteError(ctx, err)
+			return
+		}
+		joinedByAddress = strings.ToLower(strings.TrimSpace(address))
 	default:
 		response.WriteError(ctx, fmt.Errorf("invalid scope: %s", scope))
 		return
@@ -255,6 +263,7 @@ func (h *GroupHandler) ListGroups(ctx *gin.Context) {
 		ctx,
 		search,
 		ownerFilter,
+		joinedByAddress,
 		recruitingOnly,
 		publicOnly,
 		privateOnly,
@@ -553,7 +562,7 @@ func convertBits(data []byte, fromBits uint, toBits uint, pad bool) ([]byte, err
 
 func (h *GroupHandler) queryGroups(
 	ctx *gin.Context,
-	search, ownerFilter string,
+	search, ownerFilter, joinedByAddress string,
 	recruitingOnly, publicOnly, privateOnly bool,
 	sortBy, sortOrder, minReputation, maxReputation string,
 ) ([]groupItem, error) {
@@ -591,11 +600,20 @@ func (h *GroupHandler) queryGroups(
 		 FROM groups
 		 WHERE ($1 = '' OR name ILIKE '%%' || $1 || '%%' OR pool_address ILIKE '%%' || $1 || '%%')
 		   AND ($2 = '' OR creator_address = $2)
-		   AND ($3 = FALSE OR status = 0)
-		   AND ($4 = FALSE OR public_recruitment = TRUE)
-		   AND ($5 = FALSE OR public_recruitment = FALSE)
-		   AND ($6 = '' OR COALESCE(min_reputation, 0) >= $6::numeric)
-		   AND ($7 = '' OR COALESCE(min_reputation, 0) <= $7::numeric)
+		   AND ($3 = '' OR (
+		   	LOWER(creator_address) = $3
+		   	OR EXISTS (
+		   		SELECT 1
+		   		FROM group_projection_members gpm
+		   		WHERE gpm.pool_id = groups.pool_id
+		   		  AND LOWER(gpm.member_address) = $3
+		   	)
+		   ))
+		   AND ($4 = FALSE OR status = 0)
+		   AND ($5 = FALSE OR public_recruitment = TRUE)
+		   AND ($6 = FALSE OR public_recruitment = FALSE)
+		   AND ($7 = '' OR COALESCE(min_reputation, 0) >= $7::numeric)
+		   AND ($8 = '' OR COALESCE(min_reputation, 0) <= $8::numeric)
 		 ORDER BY %s
 		 LIMIT 200`,
 		orderClause,
@@ -606,6 +624,7 @@ func (h *GroupHandler) queryGroups(
 		query,
 		search,
 		ownerFilter,
+		joinedByAddress,
 		recruitingOnly,
 		publicOnly,
 		privateOnly,

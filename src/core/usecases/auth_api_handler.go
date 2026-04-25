@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/http"
 	"strings"
 
 	"chainora-api/core/constants"
@@ -20,8 +19,6 @@ import (
 // AuthHandler exposes auth endpoints using thin handler + usecase trigger pattern.
 type AuthHandler struct {
 	initSessionUC   *initSessionUsecase
-	waitForLoginUC  *waitForLoginUsecase
-	progressLoginUC *progressLoginUsecase
 	verifySignUC    *verifySignatureUsecase
 	refreshTokenUC  *refreshTokenUsecase
 	meUC            *meUsecase
@@ -38,9 +35,7 @@ func NewAuthHandler(
 	authUsecase AuthUsecase,
 	issuer TokenIssuer,
 	db *sql.DB,
-	hub *WSHub,
 	usernameResolver UsernameResolver,
-	wsOriginChecker func(r *http.Request) bool,
 ) *AuthHandler {
 	validate := validator.New()
 
@@ -48,21 +43,9 @@ func NewAuthHandler(
 		initSessionUC: &initSessionUsecase{
 			auth: authUsecase,
 		},
-		waitForLoginUC: &waitForLoginUsecase{
-			auth:     authUsecase,
-			hub:      hub,
-			upgrader: defaultUpgrader(wsOriginChecker),
-			validate: validate,
-		},
-		progressLoginUC: &progressLoginUsecase{
-			auth:     authUsecase,
-			hub:      hub,
-			validate: validate,
-		},
 		verifySignUC: &verifySignatureUsecase{
 			auth:     authUsecase,
 			issuer:   issuer,
-			hub:      hub,
 			validate: validate,
 		},
 		refreshTokenUC: &refreshTokenUsecase{
@@ -113,52 +96,9 @@ func (h *AuthHandler) InitSession(ctx *gin.Context) {
 	response.Write(ctx.Writer, response.Ok(resp))
 }
 
-// WaitForLoginWS godoc
-// @Summary Wait for login result over websocket
-// @Description Registers websocket by sessionId and waits for verify result.
-// @Tags auth
-// @Param sessionId path string true "Session ID"
-// @Success 101 {string} string "Switching Protocols"
-// @Failure 400 {object} map[string]interface{}
-// @Failure 410 {object} map[string]interface{}
-// @Router /v1/auth/ws/{sessionId} [get]
-func (h *AuthHandler) WaitForLoginWS(ctx *gin.Context) {
-	req := newWaitForLoginRequest(ctx.Param("sessionId"))
-	if err := h.waitForLoginUC.Trigger(ctx, req); err != nil {
-		response.WriteError(ctx, err)
-		return
-	}
-}
-
-// NotifyProgress godoc
-// @Summary Notify login progress over websocket
-// @Description Broadcasts an in-progress login status (e.g. awaiting_card_scan) to dapp websocket subscribers.
-// @Tags auth
-// @Accept json
-// @Produce json
-// @Param payload body progressLoginRequest true "Login progress payload"
-// @Success 200 {object} map[string]interface{}
-// @Failure 400 {object} map[string]interface{}
-// @Failure 410 {object} map[string]interface{}
-// @Router /v1/auth/progress [post]
-func (h *AuthHandler) NotifyProgress(ctx *gin.Context) {
-	var req entityrequest.ProgressLoginRequest
-	if err := requests.Serialize(ctx, &req); err != nil {
-		response.WriteError(ctx, err)
-		return
-	}
-
-	if err := h.progressLoginUC.Trigger(ctx, req); err != nil {
-		response.WriteError(ctx, err)
-		return
-	}
-
-	response.Write(ctx.Writer, response.Ok(gin.H{"accepted": true}))
-}
-
 // VerifySignature godoc
 // @Summary Verify Chainora signature
-// @Description Validates EIP-191 signature from mobile app and pushes JWT to waiting dapp websocket.
+// @Description Validates EIP-191 signature from mobile app and returns JWT pair.
 // @Tags auth
 // @Accept json
 // @Produce json

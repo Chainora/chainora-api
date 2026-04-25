@@ -59,3 +59,11 @@ cloudinary:
   api_key: ""
   api_secret: ""
   upload_preset: ""
+
+wallet_relay:
+  pair_ttl_seconds: 3600
+  request_timeout_ms: 30000
+  cleanup_interval_seconds: 20
+  ping_interval_seconds: 30
+  pairing_scheme: "chainora-wallet"
+  ws_base: ""

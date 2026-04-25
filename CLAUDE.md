@@ -55,7 +55,7 @@ src/migration  — SQL migration runner; migration files in migrations/
 
 **Config loading** (both `rest` and `worker`): YAML file is the non-secret public config (`src/rest/config/config.yaml`, `src/worker/config/config.yaml`). Secrets are loaded from `src/migration/config/.env` (auto-discovered relative path). The REST config enforcer will `panic` if secrets like `jwt.secret` or `database.url` appear in the YAML file.
 
-**Auth flow:** QR login over WebSocket. Session is created (`GET /v1/auth/session`), mobile wallet signs the nonce and posts to `POST /v1/auth/verify`, result is broadcast via `WS /v1/auth/ws/:sessionId`. Sessions are stored in-memory (`sync.Map`) unless Postgres is configured.
+**Auth flow:** Session is created (`GET /v1/auth/session`), mobile wallet signs the nonce and posts to `POST /v1/auth/verify`, backend returns JWT pair directly in REST response. Sessions are stored in-memory (`sync.Map`) unless Postgres is configured.
 
 **Groups / Pool state:** Group metadata is in Postgres; live on-chain state (`poolStatus`, `currentCycle`, etc.) is read from the pool smart contract via go-ethereum ABI calls. On list/get, stale records (>10s old) trigger async background refresh to keep latency low. Pass `?sync=true` to force synchronous refresh.
 

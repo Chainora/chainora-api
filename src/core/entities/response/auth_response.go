@@ -15,22 +15,6 @@ type VerifySignatureResponse struct {
 	RefreshToken string `json:"refreshToken"`
 }
 
-// WSLoginVerifiedEvent is pushed to dapp websocket after successful verification.
-type WSLoginVerifiedEvent struct {
-	Status       string `json:"status"`
-	SessionID    string `json:"sessionId"`
-	Address      string `json:"address"`
-	Username     string `json:"username,omitempty"`
-	Token        string `json:"token"`
-	RefreshToken string `json:"refreshToken"`
-}
-
-// WSLoginProgressEvent is pushed to dapp websocket while login is in progress.
-type WSLoginProgressEvent struct {
-	Status    string `json:"status"`
-	SessionID string `json:"sessionId"`
-}
-
 // RefreshTokenResponse is returned from refresh-token exchange.
 type RefreshTokenResponse struct {
 	Token        string `json:"token"`

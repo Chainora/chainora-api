@@ -142,5 +142,4 @@ Known issue: `src/core` currently has a duplicate fake SQL driver registration i
 ## Authentication Endpoints
 
 - `GET /v1/auth/session`
-- `GET /v1/auth/ws/:sessionId`
 - `POST /v1/auth/verify`

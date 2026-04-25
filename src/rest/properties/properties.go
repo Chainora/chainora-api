@@ -49,4 +49,10 @@ type AppProperties struct {
 	CloudinaryAPIKey               string
 	CloudinaryAPISecret            string
 	CloudinaryUploadPreset         string
+	WalletRelayPairTTL             time.Duration
+	WalletRelayRequestTimeout      time.Duration
+	WalletRelayCleanupInterval     time.Duration
+	WalletRelayPingInterval        time.Duration
+	WalletRelayPairingScheme       string
+	WalletRelayWSBase              string
 }

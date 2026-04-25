@@ -11,6 +11,7 @@ func RegisterRoutes(
 	authController *controllers.AuthController,
 	txController *controllers.TxController,
 	relayerController *controllers.RelayerController,
+	walletRelayController *controllers.WalletRelayController,
 	cardController *controllers.CardController,
 	groupController *controllers.GroupController,
 	mediaController *controllers.MediaController,
@@ -18,12 +19,10 @@ func RegisterRoutes(
 ) {
 	auth := v1.Group("/auth")
 	auth.GET("/session", authController.InitSession)
-	auth.GET("/ws/:sessionId", authController.WaitForLoginWS)
 	auth.GET("/me", authController.Me)
 	auth.GET("/profile", authController.GetProfile)
 	auth.GET("/profiles", authController.ListProfiles)
 	auth.PATCH("/profile", authController.UpdateProfile)
-	auth.POST("/progress", authController.NotifyProgress)
 	auth.POST("/verify", authController.VerifySignature)
 	auth.POST("/refresh", authController.RefreshToken)
 
@@ -38,6 +37,10 @@ func RegisterRoutes(
 	relayer.POST("/register", relayerController.RegisterUsername)
 	relayer.POST("/primary/select", relayerController.SetPrimaryUsername)
 
+	walletRelay := v1.Group("/wallet-relay")
+	walletRelay.POST("/pair", walletRelayController.Pair)
+	walletRelay.GET("/ws/:sessionId", walletRelayController.ConnectWS)
+
 	card := v1.Group("/card")
 	card.POST("/challenge", cardController.CreateChallenge)
 	card.POST("/verify", cardController.VerifyChallenge)
@@ -46,6 +49,7 @@ func RegisterRoutes(
 	groups := v1.Group("/groups")
 	groups.GET("", groupController.ListGroups)
 	groups.GET("/:poolId/view", groupController.GetGroupView)
+	groups.GET("/:poolId/sync-status", groupController.GetGroupSyncStatus)
 	groups.GET("/:poolId", groupController.GetGroup)
 	groups.POST("", groupController.CreateGroup)
 

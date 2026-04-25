@@ -3,11 +3,6 @@ package request
 // InitSessionRequest is the API request for creating a login session.
 type InitSessionRequest struct{}
 
-// WaitForLoginRequest is the API request for subscribing to login websocket.
-type WaitForLoginRequest struct {
-	SessionID string `json:"sessionId" validate:"required"`
-}
-
 // SignInRequest is the API request for QR sign-in verification.
 type SignInRequest struct {
 	SessionID string `json:"sessionId" validate:"required"`
@@ -19,12 +14,6 @@ type SignInRequest struct {
 
 // VerifySignatureRequest is kept as an alias for backward compatibility.
 type VerifySignatureRequest = SignInRequest
-
-// ProgressLoginRequest is the API request to broadcast login progress.
-type ProgressLoginRequest struct {
-	SessionID string `json:"sessionId" validate:"required"`
-	Status    string `json:"status" validate:"required"`
-}
 
 // RefreshTokenRequest is the API request to exchange refresh token.
 type RefreshTokenRequest struct {

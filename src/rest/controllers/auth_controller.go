@@ -2,7 +2,6 @@ package controllers
 
 import (
 	"database/sql"
-	"net/http"
 
 	"chainora-api/core/usecases"
 
@@ -17,16 +16,12 @@ func NewAuthController(
 	authUsecase usecases.AuthUsecase,
 	issuer usecases.TokenIssuer,
 	db *sql.DB,
-	hub *usecases.WSHub,
 	usernameResolver usecases.UsernameResolver,
-	wsOriginChecker func(r *http.Request) bool,
 ) *AuthController {
-	return &AuthController{handler: usecases.NewAuthHandler(authUsecase, issuer, db, hub, usernameResolver, wsOriginChecker)}
+	return &AuthController{handler: usecases.NewAuthHandler(authUsecase, issuer, db, usernameResolver)}
 }
 
 func (c *AuthController) InitSession(ctx *gin.Context)     { c.handler.InitSession(ctx) }
-func (c *AuthController) WaitForLoginWS(ctx *gin.Context)  { c.handler.WaitForLoginWS(ctx) }
-func (c *AuthController) NotifyProgress(ctx *gin.Context)  { c.handler.NotifyProgress(ctx) }
 func (c *AuthController) VerifySignature(ctx *gin.Context) { c.handler.VerifySignature(ctx) }
 func (c *AuthController) RefreshToken(ctx *gin.Context)    { c.handler.RefreshToken(ctx) }
 func (c *AuthController) Me(ctx *gin.Context)              { c.handler.Me(ctx) }

@@ -21,9 +21,10 @@ import (
 )
 
 type App struct {
-	server    *http.Server
-	scheduler *orchestrators.Scheduler
-	db        *sql.DB
+	server              *http.Server
+	scheduler           *orchestrators.Scheduler
+	projectionScheduler *orchestrators.Scheduler
+	db                  *sql.DB
 }
 
 func Build(cfg config.Config) *App {
@@ -79,6 +80,16 @@ func Build(cfg config.Config) *App {
 	if inviteNotificationJob != nil {
 		log.Printf("[worker] group invite notifications enabled")
 	}
+	groupProjectionJob := jobs.NewGroupStateProjectionJob(db, rpcURL)
+	if groupProjectionJob == nil {
+		if db == nil {
+			log.Printf("[worker] group state projection disabled: database is unavailable (set DB_URL or DATABASE_URL)")
+		} else {
+			log.Printf("[worker] group state projection disabled: CHAINORA_RPC_URL is empty or unavailable")
+		}
+	} else {
+		log.Printf("[worker] group state projection enabled")
+	}
 	fundingReminderJob := jobs.NewFundingReminderNotificationJob(db, rpcURL)
 	if fundingReminderJob == nil {
 		if db == nil {
@@ -90,7 +101,13 @@ func Build(cfg config.Config) *App {
 		log.Printf("[worker] funding reminder notifications enabled")
 	}
 
-	scheduler := orchestrators.NewScheduler(cfg.ScanInterval, usernameJob, inviteNotificationJob, fundingReminderJob)
+	scheduler := orchestrators.NewScheduler(
+		cfg.ScanInterval,
+		usernameJob,
+		inviteNotificationJob,
+		fundingReminderJob,
+	)
+	projectionScheduler := orchestrators.NewScheduler(5*time.Second, groupProjectionJob)
 
 	server := &http.Server{
 		Addr:              fmt.Sprintf(":%s", cfg.Port),
@@ -98,7 +115,12 @@ func Build(cfg config.Config) *App {
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	return &App{server: server, scheduler: scheduler, db: db}
+	return &App{
+		server:              server,
+		scheduler:           scheduler,
+		projectionScheduler: projectionScheduler,
+		db:                  db,
+	}
 }
 
 func (a *App) Run(ctx context.Context) error {
@@ -111,6 +133,9 @@ func (a *App) Run(ctx context.Context) error {
 	}()
 
 	go a.scheduler.Run(ctx)
+	if a.projectionScheduler != nil {
+		go a.projectionScheduler.Run(ctx)
+	}
 
 	errCh := make(chan error, 1)
 	go func() {

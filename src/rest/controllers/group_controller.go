@@ -28,4 +28,7 @@ func NewGroupControllerWithOptions(
 func (c *GroupController) ListGroups(ctx *gin.Context)   { c.handler.ListGroups(ctx) }
 func (c *GroupController) GetGroupView(ctx *gin.Context) { c.handler.GetGroupView(ctx) }
 func (c *GroupController) GetGroup(ctx *gin.Context)     { c.handler.GetGroup(ctx) }
-func (c *GroupController) CreateGroup(ctx *gin.Context)  { c.handler.CreateGroup(ctx) }
+func (c *GroupController) GetGroupSyncStatus(ctx *gin.Context) {
+	c.handler.GetGroupSyncStatus(ctx)
+}
+func (c *GroupController) CreateGroup(ctx *gin.Context) { c.handler.CreateGroup(ctx) }

@@ -53,3 +53,11 @@ relayer:
 card:
   factory_root_public_key: "043e5662949af3d3bdf8c226bdd8444098a14f8960870ccb5be55bbe098b363aadd06109c1c50cfcfb44f80ecd082fd1d00fc8de8c73ed521ad0bab962422f721a"
   device_verifier_private_key: ""
+
+wallet_relay:
+  pair_ttl_seconds: 3600
+  request_timeout_ms: 30000
+  cleanup_interval_seconds: 20
+  ping_interval_seconds: 30
+  pairing_scheme: "chainora-wallet"
+  ws_base: ""

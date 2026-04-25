@@ -24,6 +24,17 @@ const (
 	defaultInviteLabelFallback  = "a group member"
 )
 
+func isExecutionRevertedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if message == "" {
+		return false
+	}
+	return strings.Contains(message, "execution reverted") || strings.Contains(message, "reverted")
+}
+
 type GroupInviteNotificationJob struct {
 	db                     *sql.DB
 	client                 *ethclient.Client
@@ -260,10 +271,10 @@ func (j *GroupInviteNotificationJob) Run(ctx context.Context) error {
 
 		proposalID := new(big.Int).SetBytes(eventLog.Topics[1].Bytes())
 		proposalIDText := proposalID.String()
-		proposalState, proposalErr := j.readInviteProposalState(ctx, eventLog.Address, proposalID)
+		proposalState, proposalErr := j.readInviteProposalState(ctx, eventLog.Address, proposalID, eventLog.BlockNumber)
 		if proposalErr != nil {
 			log.Printf("[worker][%s] pool=%s proposal=%s read inviteProposal failed: %v", j.Name(), group.poolID, proposalIDText, proposalErr)
-			if firstProcessErr == nil {
+			if firstProcessErr == nil && !isExecutionRevertedError(proposalErr) {
 				firstProcessErr = proposalErr
 			}
 			continue
@@ -374,16 +385,22 @@ func (j *GroupInviteNotificationJob) readInviteProposalState(
 	ctx context.Context,
 	poolAddress common.Address,
 	proposalID *big.Int,
+	blockNumber uint64,
 ) (inviteProposalState, error) {
 	encodedCall, packErr := j.poolReadABI.Pack("inviteProposal", proposalID)
 	if packErr != nil {
 		return inviteProposalState{}, fmt.Errorf("pack inviteProposal call: %w", packErr)
 	}
 
+	var blockArg *big.Int
+	if blockNumber > 0 {
+		blockArg = new(big.Int).SetUint64(blockNumber)
+	}
+
 	rawResult, callErr := j.client.CallContract(ctx, ethereum.CallMsg{
 		To:   &poolAddress,
 		Data: encodedCall,
-	}, nil)
+	}, blockArg)
 	if callErr != nil {
 		return inviteProposalState{}, fmt.Errorf("call inviteProposal: %w", callErr)
 	}

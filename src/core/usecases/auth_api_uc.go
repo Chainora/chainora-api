@@ -3,11 +3,8 @@ package usecases
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
-	"net/http"
 	"strconv"
 	"strings"
 
@@ -17,7 +14,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
-	"github.com/gorilla/websocket"
 )
 
 // TokenIssuer is the abstraction used to mint JWTs.
@@ -40,52 +36,9 @@ func (u *initSessionUsecase) Trigger(_ *gin.Context, _ entityrequest.InitSession
 	return entityresponse.InitSessionResponse{SessionID: session.ID, Nonce: session.Nonce}, nil
 }
 
-type waitForLoginUsecase struct {
-	auth     AuthUsecase
-	hub      *WSHub
-	upgrader websocket.Upgrader
-	validate *validator.Validate
-}
-
-func (u *waitForLoginUsecase) Trigger(ctx *gin.Context, req entityrequest.WaitForLoginRequest) error {
-	if err := u.validate.Struct(req); err != nil {
-		return err
-	}
-
-	if err := u.auth.ValidateLoginSession(req.SessionID); err != nil {
-		return err
-	}
-
-	conn, err := u.upgrader.Upgrade(ctx.Writer, ctx.Request, nil)
-	if err != nil {
-		return fmt.Errorf("ws upgrade: %w", err)
-	}
-
-	u.hub.Register(req.SessionID, conn)
-	log.Printf("ws connected sessionId=%s", req.SessionID)
-	defer func() {
-		u.hub.Unregister(req.SessionID, conn)
-		_ = conn.Close()
-		log.Printf("ws disconnected sessionId=%s", req.SessionID)
-	}()
-
-	for {
-		if _, _, readErr := conn.ReadMessage(); readErr != nil {
-			return nil
-		}
-	}
-}
-
 type verifySignatureUsecase struct {
 	auth     AuthUsecase
 	issuer   TokenIssuer
-	hub      *WSHub
-	validate *validator.Validate
-}
-
-type progressLoginUsecase struct {
-	auth     AuthUsecase
-	hub      *WSHub
 	validate *validator.Validate
 }
 
@@ -149,20 +102,6 @@ func (u *verifySignatureUsecase) Trigger(_ *gin.Context, req entityrequest.SignI
 		return entityresponse.VerifySignatureResponse{}, fmt.Errorf("generate token: %w", err)
 	}
 
-	message, err := json.Marshal(entityresponse.WSLoginVerifiedEvent{
-		Status:       "verified",
-		SessionID:    req.SessionID,
-		Address:      user.Address,
-		Username:     user.Username,
-		Token:        token,
-		RefreshToken: refreshToken,
-	})
-	if err != nil {
-		return entityresponse.VerifySignatureResponse{}, fmt.Errorf("marshal websocket payload: %w", err)
-	}
-	u.hub.Broadcast(req.SessionID, message)
-	log.Printf("qr verify success sessionId=%s address=%s", req.SessionID, user.Address)
-
 	return entityresponse.VerifySignatureResponse{
 		Verified:     true,
 		Address:      user.Address,
@@ -170,28 +109,6 @@ func (u *verifySignatureUsecase) Trigger(_ *gin.Context, req entityrequest.SignI
 		Token:        token,
 		RefreshToken: refreshToken,
 	}, nil
-}
-
-func (u *progressLoginUsecase) Trigger(_ *gin.Context, req entityrequest.ProgressLoginRequest) error {
-	if err := u.validate.Struct(req); err != nil {
-		return err
-	}
-
-	if err := u.auth.ValidateLoginSession(req.SessionID); err != nil {
-		return err
-	}
-
-	message, err := json.Marshal(entityresponse.WSLoginProgressEvent{
-		Status:    req.Status,
-		SessionID: req.SessionID,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal websocket payload: %w", err)
-	}
-
-	u.hub.Broadcast(req.SessionID, message)
-	log.Printf("qr progress sessionId=%s status=%s", req.SessionID, req.Status)
-	return nil
 }
 
 func (u *refreshTokenUsecase) Trigger(_ *gin.Context, req entityrequest.RefreshTokenRequest) (entityresponse.RefreshTokenResponse, error) {
@@ -512,16 +429,4 @@ func isLikelyEVMAddress(value string) bool {
 	}
 
 	return true
-}
-
-func newWaitForLoginRequest(rawSessionID string) entityrequest.WaitForLoginRequest {
-	return entityrequest.WaitForLoginRequest{SessionID: strings.TrimSpace(rawSessionID)}
-}
-
-func defaultUpgrader(originChecker func(r *http.Request) bool) websocket.Upgrader {
-	if originChecker == nil {
-		originChecker = func(_ *http.Request) bool { return false }
-	}
-
-	return websocket.Upgrader{CheckOrigin: originChecker}
 }

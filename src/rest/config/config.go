@@ -87,6 +87,15 @@ type yamlConfig struct {
 		APISecret    string `yaml:"api_secret"`
 		UploadPreset string `yaml:"upload_preset"`
 	} `yaml:"cloudinary"`
+
+	WalletRelay struct {
+		PairTTLSeconds         int    `yaml:"pair_ttl_seconds"`
+		RequestTimeoutMS       int    `yaml:"request_timeout_ms"`
+		CleanupIntervalSeconds int    `yaml:"cleanup_interval_seconds"`
+		PingIntervalSeconds    int    `yaml:"ping_interval_seconds"`
+		PairingScheme          string `yaml:"pairing_scheme"`
+		WSBase                 string `yaml:"ws_base"`
+	} `yaml:"wallet_relay"`
 }
 
 func Load() properties.AppProperties {
@@ -151,6 +160,34 @@ func Load() properties.AppProperties {
 	reputationSyncRetryMax := parseIntEnv("REPUTATION_SYNC_RETRY_MAX", 2)
 	reputationSyncCooldownSeconds := int64(parseIntEnv("REPUTATION_SYNC_COOLDOWN_SECONDS", 15))
 	reputationSyncBatchSize := parseIntEnv("REPUTATION_SYNC_BATCH_SIZE", 100)
+	walletRelayPairTTLSeconds := parseIntEnv("WALLET_RELAY_PAIR_TTL_SECONDS", raw.WalletRelay.PairTTLSeconds)
+	if walletRelayPairTTLSeconds <= 0 {
+		walletRelayPairTTLSeconds = 3600
+	}
+	walletRelayRequestTimeoutMS := parseIntEnv("WALLET_RELAY_REQUEST_TIMEOUT_MS", raw.WalletRelay.RequestTimeoutMS)
+	if walletRelayRequestTimeoutMS <= 0 {
+		walletRelayRequestTimeoutMS = 30_000
+	}
+	walletRelayCleanupIntervalSeconds := parseIntEnv(
+		"WALLET_RELAY_CLEANUP_INTERVAL_SECONDS",
+		raw.WalletRelay.CleanupIntervalSeconds,
+	)
+	if walletRelayCleanupIntervalSeconds <= 0 {
+		walletRelayCleanupIntervalSeconds = 20
+	}
+	walletRelayPingIntervalSeconds := parseIntEnv(
+		"WALLET_RELAY_PING_INTERVAL_SECONDS",
+		raw.WalletRelay.PingIntervalSeconds,
+	)
+	if walletRelayPingIntervalSeconds <= 0 {
+		walletRelayPingIntervalSeconds = 30
+	}
+	walletRelayPairingScheme := secretString(
+		"WALLET_RELAY_PAIRING_SCHEME",
+		strings.TrimSpace(raw.WalletRelay.PairingScheme),
+		"chainora-wallet",
+	)
+	walletRelayWSBase := secretString("WALLET_RELAY_WS_BASE", strings.TrimSpace(raw.WalletRelay.WSBase), "")
 
 	return properties.AppProperties{
 		ServerPort:                     fallback(strings.TrimSpace(raw.Server.Port), "8080"),
@@ -198,6 +235,12 @@ func Load() properties.AppProperties {
 		CloudinaryAPIKey:               cloudAPIKey,
 		CloudinaryAPISecret:            cloudAPISecret,
 		CloudinaryUploadPreset:         uploadPreset,
+		WalletRelayPairTTL:             time.Duration(walletRelayPairTTLSeconds) * time.Second,
+		WalletRelayRequestTimeout:      time.Duration(walletRelayRequestTimeoutMS) * time.Millisecond,
+		WalletRelayCleanupInterval:     time.Duration(walletRelayCleanupIntervalSeconds) * time.Second,
+		WalletRelayPingInterval:        time.Duration(walletRelayPingIntervalSeconds) * time.Second,
+		WalletRelayPairingScheme:       walletRelayPairingScheme,
+		WalletRelayWSBase:              walletRelayWSBase,
 	}
 }
 
